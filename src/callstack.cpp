@@ -27,6 +27,7 @@
 #include "utility.h"    // Provides various utility functions.
 #include "vldheap.h"    // Provides internal new and delete operators.
 #include "vldint.h"     // Provides access to VLD internals.
+#include "loaderlock.h"
 #include "cppformat\format.h"
 
 // Imported global variables.
@@ -768,6 +769,7 @@ VOID SafeCallStack::getStackTrace (UINT32 maxdepth, const context_t& context)
         push_back(function);
     }
 
+    LoaderLock ll;
     DWORD   architecture   = X86X64ARCHITECTURE;
 
     // Get the required values for initialization of the STACKFRAME64 structure

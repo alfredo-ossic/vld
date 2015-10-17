@@ -23,12 +23,6 @@ environment:
     Solution: vld_vs12.sln
   - VldStackWalkMethod: fast
     Solution: vld_vs14.sln
-  - VldStackWalkMethod: safe
-    Solution: vld_vs11.sln
-  - VldStackWalkMethod: safe
-    Solution: vld_vs12.sln
-  - VldStackWalkMethod: safe
-    Solution: vld_vs14.sln
 
 platform:
   - Win32
