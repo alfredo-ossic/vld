@@ -12,13 +12,9 @@ environment:
 
   matrix:
   - VldStackWalkMethod: safe
-    Solution: vld_vs11.sln
-  - VldStackWalkMethod: safe
     Solution: vld_vs12.sln
   - VldStackWalkMethod: safe
     Solution: vld_vs14.sln
-  - VldStackWalkMethod: fast
-    Solution: vld_vs11.sln
   - VldStackWalkMethod: fast
     Solution: vld_vs12.sln
   - VldStackWalkMethod: fast
@@ -29,10 +25,10 @@ platform:
   - x64
 
 configuration:
-  - Debug_VldRelease
   - Debug_VldRelease_StaticCrt
-  - Release
   - Release_StaticCrt
+  - Debug_VldRelease
+  - Release
 
 matrix:
   fast_finish: false
@@ -99,7 +95,6 @@ test_script:
     { 
         vld_vs14.sln { "v140" }
         vld_vs12.sln { "v120" }
-        vld_vs11.sln { "v110" }
         default {
             throw "No matching environment for $env:Solution"
         }
