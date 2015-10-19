@@ -27,7 +27,6 @@
 #include "utility.h"    // Provides various utility functions.
 #include "vldheap.h"    // Provides internal new and delete operators.
 #include "vldint.h"     // Provides access to VLD internals.
-#include "loaderlock.h"
 #include "cppformat\format.h"
 
 // Imported global variables.
@@ -761,8 +760,6 @@ VOID FastCallStack::getStackTrace (UINT32 maxdepth, const context_t& context)
 //
 VOID SafeCallStack::getStackTrace (UINT32 maxdepth, const context_t& context)
 {
-    LoaderLock ll;
-
     UINT32 count = 0;
     UINT_PTR function = context.func;
     if (function != NULL)
