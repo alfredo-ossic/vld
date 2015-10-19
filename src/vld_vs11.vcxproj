@@ -205,7 +205,7 @@
     <Natvis Include="vld.natvis" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\lib\cppformat\format_vs12.vcxproj">
+    <ProjectReference Include="..\lib\cppformat\format_vs11.vcxproj">
       <Project>{4adfd279-56c6-4b1d-ba9e-b815e81c1b17}</Project>
     </ProjectReference>
   </ItemGroup>
