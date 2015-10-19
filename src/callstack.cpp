@@ -761,6 +761,8 @@ VOID FastCallStack::getStackTrace (UINT32 maxdepth, const context_t& context)
 //
 VOID SafeCallStack::getStackTrace (UINT32 maxdepth, const context_t& context)
 {
+    LoaderLock ll;
+
     UINT32 count = 0;
     UINT_PTR function = context.func;
     if (function != NULL)
@@ -769,7 +771,6 @@ VOID SafeCallStack::getStackTrace (UINT32 maxdepth, const context_t& context)
         push_back(function);
     }
 
-    LoaderLock ll;
     DWORD   architecture   = X86X64ARCHITECTURE;
 
     // Get the required values for initialization of the STACKFRAME64 structure
