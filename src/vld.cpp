@@ -2808,3 +2808,26 @@ int VisualLeakDetector::ResolveCallstacks()
     }
     return unresolvedFunctionsCount;
 }
+
+CaptureContext::CaptureContext(context_t &context, BOOL bDebugRuntime, void* func) {
+    m_tls = g_vld.getTls();
+
+    if (bDebugRuntime)
+        m_tls->flags |= VLD_TLS_DEBUGCRTALLOC;
+
+    m_bFirst = (m_tls->context.fp == NULL);
+    if (m_bFirst) {
+        // This is the first call to enter VLD for the current allocation.
+        // Record the current frame pointer.
+        if (func) {
+            CAPTURE_CONTEXT(context, func);
+        }
+        m_tls->context = context;
+    }
+}
+
+CaptureContext::~CaptureContext() {
+    if (m_bFirst) {
+        g_vld.firstAllocCall(m_tls);
+    }
+}

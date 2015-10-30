@@ -182,6 +182,20 @@ struct tls_t {
 // allocated in the process.
 typedef Map<DWORD,tls_t*> TlsMap;
 
+class CaptureContext {
+public:
+    CaptureContext(context_t &context, BOOL bDebugRuntime, void* func);
+    ~CaptureContext();
+private:
+    // Disallow certain operations
+    CaptureContext();
+    CaptureContext(const CaptureContext&);
+    CaptureContext& operator=(const CaptureContext&);
+private:
+    tls_t *m_tls;
+    BOOL m_bFirst;
+};
+
 class CallStack;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -212,6 +226,7 @@ class CallStack;
 //
 class VisualLeakDetector : public IMalloc
 {
+    friend class CaptureContext;
 public:
     VisualLeakDetector();
     ~VisualLeakDetector();
