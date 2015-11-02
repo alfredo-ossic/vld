@@ -184,8 +184,9 @@ typedef Map<DWORD,tls_t*> TlsMap;
 
 class CaptureContext {
 public:
-    CaptureContext(context_t &context, BOOL bDebugRuntime, void* func);
+    CaptureContext(context_t &context, BOOL debug, void* func, UINT_PTR fp = (UINT_PTR)_ReturnAddress());
     ~CaptureContext();
+    void Set(HANDLE heap, LPVOID mem, LPVOID newmem, SIZE_T size);
 private:
     // Disallow certain operations
     CaptureContext();
@@ -194,6 +195,7 @@ private:
 private:
     tls_t *m_tls;
     BOOL m_bFirst;
+    BOOL m_bExclude;
 };
 
 class CallStack;
@@ -355,7 +357,6 @@ private:
     static bool isModuleExcluded (UINT_PTR returnaddress);
     blockinfo_t* findAllocedBlock(LPCVOID, __out HANDLE& heap);
     static void getCallStack( CallStack *&pcallstack, context_t &context );
-    static void firstAllocCall(tls_t * tls);
     void setupReporting();
     void checkInternalMemoryLeaks();
     bool waitForAllVLDThreads();
@@ -387,9 +388,6 @@ private:
     static HRESULT __stdcall _CoGetMalloc (DWORD context, LPMALLOC *imalloc);
     static LPVOID  __stdcall _CoTaskMemAlloc (SIZE_T size);
     static LPVOID  __stdcall _CoTaskMemRealloc (LPVOID mem, SIZE_T size);
-
-    static void AllocateHeap (tls_t* tls, blockinfo_t* &pblockInfo);
-    static void ReAllocateHeap (tls_t *tls, blockinfo_t* &pblockInfo);
 
     ////////////////////////////////////////////////////////////////////////////////
     // Private data
@@ -427,6 +425,7 @@ private:
     CriticalSection      m_tlsLock;           // Protects accesses to the Set of TLS structures.
     TlsMap              *m_tlsMap;            // Set of all thread-local storage structures for the process.
     HMODULE              m_vldBase;           // Visual Leak Detector's own module handle (base address).
+    HMODULE              m_dbghelp;
 
     VOID __stdcall ChangeModuleState(HMODULE module, bool on);
     static GetProcAddress_t m_GetProcAddress;

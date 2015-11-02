@@ -46,35 +46,6 @@ extern HANDLE           g_currentProcess;
 extern CriticalSection  g_heapMapLock;
 extern DgbHelp g_DbgHelp;
 
-void VisualLeakDetector::firstAllocCall(tls_t * tls)
-{
-    if (tls->blockWithoutGuard) {
-        context_t context = tls->context;
-        blockinfo_t* pblockInfo = NULL;
-        if (tls->newBlockWithoutGuard == NULL)
-            AllocateHeap(tls, pblockInfo);
-        else
-            ReAllocateHeap(tls, pblockInfo);
-
-        // Reset thread local flags and variables in case dbghelp.dll try allocate some data.
-        tls->context.fp = NULL;
-        tls->context.func = 0x0;
-        tls->blockWithoutGuard = NULL;
-        tls->flags &= ~VLD_TLS_DEBUGCRTALLOC;
-
-        CallStack* callstack;
-        getCallStack(callstack, context);
-        pblockInfo->callStack.reset(callstack);
-        return;
-    }
-
-    // Reset thread local flags and variables for the next allocation.
-    tls->context.fp = NULL;
-    tls->context.func = 0x0;
-    tls->blockWithoutGuard = NULL;
-    tls->flags &= ~VLD_TLS_DEBUGCRTALLOC;
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 //
 // Standard CRT and MFC IAT Replacement Functions
@@ -1188,36 +1159,11 @@ LPVOID VisualLeakDetector::_RtlAllocateHeap(HANDLE heap, DWORD flags, SIZE_T siz
     if ((block == NULL) || !g_vld.enabled())
         return block;
 
-    tls_t *tls = g_vld.getTls();
-    bool firstcall = (tls->context.fp == 0x0);
-    context_t context;
-    if (firstcall) {
-        // This is the first call to enter VLD for the current allocation.
-        // Record the current frame pointer.
-        CAPTURE_CONTEXT(context, RtlAllocateHeap);
-    } else
-        context = tls->context;
-
-    if (isModuleExcluded(GET_RETURN_ADDRESS(context))) {
-        assert(tls->blockWithoutGuard == NULL);
-        return block;
+    if (!g_DbgHelp.IsLockedByCurrentThread()) { // skip dbghelp.dll calls
+        context_t context;
+        CaptureContext cc(context, FALSE, RtlAllocateHeap);
+        cc.Set(heap, block, NULL, size);
     }
-
-    if (!firstcall && (g_vld.m_options & VLD_OPT_TRACE_INTERNAL_FRAMES)) {
-        // Begin the stack trace with the current frame. Obtain the current
-        // frame pointer.
-        firstcall = true;
-        CAPTURE_CONTEXT(context, RtlAllocateHeap);
-    }
-
-    tls->context = context;
-    tls->heap = heap;
-    tls->blockWithoutGuard = block;
-    tls->newBlockWithoutGuard = NULL;
-    tls->size = size;
-
-    if (firstcall)
-        firstAllocCall(tls);
 
     return block;
 }
@@ -1234,47 +1180,13 @@ LPVOID VisualLeakDetector::_HeapAlloc(HANDLE heap, DWORD flags, SIZE_T size)
     if ((block == NULL) || !g_vld.enabled())
         return block;
 
-    tls_t *tls = g_vld.getTls();
-    bool firstcall = (tls->context.fp == 0x0);
-    context_t context;
-    if (firstcall) {
-        // This is the first call to enter VLD for the current allocation.
-        // Record the current frame pointer.
-        CAPTURE_CONTEXT(context, HeapAlloc);
-    } else
-        context = tls->context;
-
-    if (isModuleExcluded(GET_RETURN_ADDRESS(context))) {
-        assert(tls->blockWithoutGuard == NULL);
-        return block;
+    if (!g_DbgHelp.IsLockedByCurrentThread()) { // skip dbghelp.dll calls
+        context_t context;
+        CaptureContext cc(context, FALSE, HeapAlloc);
+        cc.Set(heap, block, NULL, size);
     }
-
-    if (!firstcall && (g_vld.m_options & VLD_OPT_TRACE_INTERNAL_FRAMES)) {
-        // Begin the stack trace with the current frame. Obtain the current
-        // frame pointer.
-        firstcall = true;
-        CAPTURE_CONTEXT(context, HeapAlloc);
-    }
-
-    tls->context = context;
-    tls->heap = heap;
-    tls->blockWithoutGuard = block;
-    tls->newBlockWithoutGuard = NULL;
-    tls->size = size;
-
-    if (firstcall)
-        firstAllocCall(tls);
 
     return block;
-}
-
-void VisualLeakDetector::AllocateHeap(tls_t* tls, blockinfo_t* &pblockInfo)
-{
-    bool debugcrtalloc = (tls->flags & VLD_TLS_DEBUGCRTALLOC) ? true : false;
-
-    // The module that initiated this allocation is included in leak
-    // detection. Map this block to the specified heap.
-    g_vld.mapBlock(tls->heap, tls->blockWithoutGuard, tls->size, debugcrtalloc, tls->threadId, pblockInfo);
 }
 
 // _RtlFreeHeap - Calls to RtlFreeHeap are patched through to this function.
@@ -1368,37 +1280,10 @@ LPVOID VisualLeakDetector::_RtlReAllocateHeap(HANDLE heap, DWORD flags, LPVOID m
     if ((newmem == NULL) || !g_vld.enabled())
         return newmem;
 
-    tls_t *tls = g_vld.getTls();
-    bool firstcall = (tls->context.fp == 0x0);
-    context_t context;
-    if (firstcall) {
-        // This is the first call to enter VLD for the current allocation.
-        // Record the current frame pointer.
-        CAPTURE_CONTEXT(context, RtlReAllocateHeap);
-    } else
-        context = tls->context;
-
-    if (isModuleExcluded(GET_RETURN_ADDRESS(context))) {
-        assert(tls->blockWithoutGuard == NULL);
-        return newmem;
-    }
-
-    if (!firstcall && (g_vld.m_options & VLD_OPT_TRACE_INTERNAL_FRAMES)) {
-        // Begin the stack trace with the current frame. Obtain the current
-        // frame pointer.
-        firstcall = true;
-        CAPTURE_CONTEXT(context, RtlReAllocateHeap);
-    }
-
-    tls->context = context;
-    tls->heap = heap;
-    tls->blockWithoutGuard = mem;
-    tls->newBlockWithoutGuard = newmem;
-    tls->size = size;
-
-    if (firstcall) {
-        firstAllocCall(tls);
-        tls->blockWithoutGuard = NULL;
+    if (!g_DbgHelp.IsLockedByCurrentThread()) { // skip dbghelp.dll calls
+        context_t context;
+        CaptureContext cc(context, FALSE, RtlReAllocateHeap);
+        cc.Set(heap, mem, newmem, size);
     }
 
     return newmem;
@@ -1416,73 +1301,13 @@ LPVOID VisualLeakDetector::_HeapReAlloc(HANDLE heap, DWORD flags, LPVOID mem, SI
     if ((newmem == NULL) || !g_vld.enabled())
         return newmem;
 
-    tls_t *tls = g_vld.getTls();
-    bool firstcall = (tls->context.fp == 0x0);
-    context_t context;
-    if (firstcall) {
-        // This is the first call to enter VLD for the current allocation.
-        // Record the current frame pointer.
-        CAPTURE_CONTEXT(context, HeapReAlloc);
-    } else
-        context = tls->context;
-
-    if (isModuleExcluded(GET_RETURN_ADDRESS(context))) {
-        assert(tls->blockWithoutGuard == NULL);
-        return newmem;
-    }
-
-    if (!firstcall && (g_vld.m_options & VLD_OPT_TRACE_INTERNAL_FRAMES)) {
-        // Begin the stack trace with the current frame. Obtain the current
-        // frame pointer.
-        firstcall = true;
-        CAPTURE_CONTEXT(context, HeapReAlloc);
-    }
-
-    tls->context = context;
-    tls->heap = heap;
-    tls->blockWithoutGuard = mem;
-    tls->newBlockWithoutGuard = newmem;
-    tls->size = size;
-
-    if (firstcall) {
-        firstAllocCall(tls);
-        tls->blockWithoutGuard = NULL;
+    if (!g_DbgHelp.IsLockedByCurrentThread()) { // skip dbghelp.dll calls
+        context_t context;
+        CaptureContext cc(context, FALSE, HeapReAlloc);
+        cc.Set(heap, mem, newmem, size);
     }
 
     return newmem;
-}
-
-void VisualLeakDetector::ReAllocateHeap(tls_t *tls, blockinfo_t* &pblockInfo)
-{
-#ifdef PRINTHOOKCALLS
-    DbgReport(_T(__FUNCTION__) _T("\n"));
-#endif
-    bool crtalloc = (tls->flags & VLD_TLS_DEBUGCRTALLOC) ? true : false;
-
-    context_t context = tls->context;
-    HANDLE heap = tls->heap;
-    LPVOID mem = tls->blockWithoutGuard;
-    LPVOID newmem = tls->newBlockWithoutGuard;
-    SIZE_T size = tls->size;
-
-    // Reset thread local flags and variables, in case any libraries called
-    // into while remapping the block allocate some memory.
-    tls->context.fp = NULL;
-    tls->context.func = 0x0;
-    tls->flags &= ~VLD_TLS_DEBUGCRTALLOC;
-
-    // The module that initiated this allocation is included in leak
-    // detection. Remap the block.
-    g_vld.remapBlock(heap, mem, newmem, size, crtalloc, tls->threadId, pblockInfo, context);
-
-#ifdef _DEBUG
-    if (tls->context.fp != 0)
-        __debugbreak();
-#endif
-    if (crtalloc)
-        tls->flags |= VLD_TLS_DEBUGCRTALLOC;
-
-    tls->context = context;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
