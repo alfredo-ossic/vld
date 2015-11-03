@@ -43,8 +43,7 @@
 #include <tchar.h>
 
 extern HANDLE           g_currentProcess;
-extern CriticalSection  g_heapMapLock;
-extern DgbHelp g_DbgHelp;
+extern DgbHelp          g_DbgHelp;
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -1062,11 +1061,8 @@ HANDLE VisualLeakDetector::_GetProcessHeap()
     // Get the process heap.
     HANDLE heap = m_GetProcessHeap();
 
-    CriticalSectionLocker cs(g_heapMapLock);
-    HeapMap::Iterator heapit = g_vld.m_heapMap->find(heap);
-    if (heapit == g_vld.m_heapMap->end()) {
-        g_vld.mapHeap(heap);
-        heapit = g_vld.m_heapMap->find(heap);
+    if (!g_vld.m_heapMap->FindHeap(heap)) {
+        g_vld.m_heapMap->MapHeap(heap);
     }
 
     return heap;
@@ -1094,13 +1090,8 @@ HANDLE VisualLeakDetector::_HeapCreate(DWORD options, SIZE_T initsize, SIZE_T ma
     // Create the heap.
     HANDLE heap = m_HeapCreate(options, initsize, maxsize);
 
-    CriticalSectionLocker cs(g_heapMapLock);
-
     // Map the created heap handle to a new block map.
-    g_vld.mapHeap(heap);
-
-    HeapMap::Iterator heapit = g_vld.m_heapMap->find(heap);
-    assert(heapit != g_vld.m_heapMap->end());
+    g_vld.m_heapMap->MapHeap(heap);
 
     return heap;
 }
@@ -1125,9 +1116,9 @@ BOOL VisualLeakDetector::_HeapDestroy(HANDLE heap)
     // for this heap now, while we can still read from the memory blocks
     // allocated to it.
     if (!(g_vld.m_options & VLD_OPT_SKIP_HEAPFREE_LEAKS))
-        g_vld.reportHeapLeaks(heap);
+        g_vld.m_heapMap->ReportLeaks(heap);
 
-    g_vld.unmapHeap(heap);
+    g_vld.m_heapMap->UnMapHeap(heap);
 
     return HeapDestroy(heap);
 }
@@ -1218,7 +1209,7 @@ BYTE VisualLeakDetector::_RtlFreeHeap(HANDLE heap, DWORD flags, LPVOID mem)
         CAPTURE_CONTEXT(context, RtlFreeHeap);
 
         // Unmap the block from the specified heap.
-        g_vld.unmapBlock(heap, mem, context);
+        g_vld.m_heapMap->UnMapBlock(heap, mem, context);
     }
 
     status = RtlFreeHeap(heap, flags, mem);
@@ -1241,7 +1232,7 @@ BOOL VisualLeakDetector::_HeapFree(HANDLE heap, DWORD flags, LPVOID mem)
         CAPTURE_CONTEXT(context, m_HeapFree);
 
         // Unmap the block from the specified heap.
-        g_vld.unmapBlock(heap, mem, context);
+        g_vld.m_heapMap->UnMapBlock(heap, mem, context);
     }
 
     status = m_HeapFree(heap, flags, mem);

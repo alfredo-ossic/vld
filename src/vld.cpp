@@ -51,9 +51,8 @@ extern CriticalSection   g_vldHeapLock;
 HANDLE           g_currentProcess; // Pseudo-handle for the current process.
 HANDLE           g_currentThread;  // Pseudo-handle for the current thread.
 HANDLE           g_processHeap;    // Handle to the process's heap (COM allocations come from here).
-CriticalSection  g_heapMapLock;    // Serializes access to the heap and block maps.
 ReportHookSet*   g_pReportHooks;
-DgbHelp g_DbgHelp;
+DgbHelp          g_DbgHelp;
 
 // The one and only VisualLeakDetector object instance.
 __declspec(dllexport) VisualLeakDetector g_vld;
@@ -387,14 +386,12 @@ VisualLeakDetector::VisualLeakDetector ()
 
     LoaderLock ll;
 
-    g_heapMapLock.Initialize();
     g_vldHeap         = HeapCreate(0x0, 0, 0);
     g_vldHeapLock.Initialize();
     g_pReportHooks    = new ReportHookSet;
 
     // Initialize remaining private data.
     m_heapMap         = new HeapMap;
-    m_heapMap->reserve(HEAP_MAP_RESERVE);
     m_iMalloc         = NULL;
     m_requestCurr     = 1;
     m_totalAlloc      = 0;
@@ -405,8 +402,6 @@ VisualLeakDetector::VisualLeakDetector ()
     m_modulesLock.Initialize();
     m_selfTestFile    = __FILE__;
     m_selfTestLine    = 0;
-    m_tlsIndex        = TlsAlloc();
-    m_tlsLock.Initialize();
     m_tlsMap          = new TlsMap;
 
     if (m_options & VLD_OPT_SELF_TEST) {
@@ -433,14 +428,6 @@ VisualLeakDetector::VisualLeakDetector ()
         // output. (For working around a bug in VC6 where data sent to the
         // debugger gets lost if it's sent too fast).
         InsertReportDelay();
-    }
-
-    // This is highly unlikely to happen, but just in case, check to be sure
-    // we got a valid TLS index.
-    if (m_tlsIndex == TLS_OUT_OF_INDEXES) {
-        Report(L"ERROR: Visual Leak Detector could not be installed because thread local"
-            L"  storage could not be allocated.");
-        return;
     }
 
     // Initialize the symbol handler. We use it for obtaining source file/line
@@ -493,53 +480,6 @@ VisualLeakDetector::VisualLeakDetector ()
             L"  been specified, the default file name is \"" VLD_DEFAULT_REPORT_FILE_NAME L"\".\n");
     }
     reportConfig();
-}
-
-bool VisualLeakDetector::waitForAllVLDThreads()
-{
-    bool threadsactive = false;
-    DWORD dwCurProcessID = GetCurrentProcessId();
-    int waitcount = 0;
-
-    // See if any threads that have ever entered VLD's code are still active.
-    CriticalSectionLocker cs(m_tlsLock);
-    for (TlsMap::Iterator tlsit = m_tlsMap->begin(); tlsit != m_tlsMap->end(); ++tlsit) {
-        if ((*tlsit).second->threadId == GetCurrentThreadId()) {
-            // Don't wait for the current thread to exit.
-            continue;
-        }
-
-        HANDLE thread = OpenThread(SYNCHRONIZE | THREAD_QUERY_INFORMATION, FALSE, (*tlsit).second->threadId);
-        if (thread == NULL) {
-            // Couldn't query this thread. We'll assume that it exited.
-            continue; // XXX should we check GetLastError()?
-        }
-        if (GetProcessIdOfThread(thread) != dwCurProcessID) {
-            //The thread ID has been recycled.
-            CloseHandle(thread);
-            continue;
-        }
-        if (WaitForSingleObject(thread, 10000) == WAIT_TIMEOUT) { // 10 seconds
-            // There is still at least one other thread running. The CRT
-            // will stomp it dead when it cleans up, which is not a
-            // graceful way for a thread to go down. Warn about this,
-            // and wait until the thread has exited so that we know it
-            // can't still be off running somewhere in VLD's code.
-            //
-            // Since we've been waiting a while, let the human know we are
-            // still here and alive.
-            waitcount++;
-            threadsactive = true;
-            if (waitcount >= 9) // 90 sec.
-            {
-                CloseHandle(thread);
-                return threadsactive;
-            }
-            Report(L"Visual Leak Detector: Waiting for threads to terminate...\n");
-        }
-        CloseHandle(thread);
-    }
-    return threadsactive;
 }
 
 void VisualLeakDetector::checkInternalMemoryLeaks()
@@ -609,7 +549,7 @@ VisualLeakDetector::~VisualLeakDetector ()
         if (kernelBase != NULL)
             RestoreImport(kernelBase, ntdllPatch);
 
-        BOOL threadsactive = waitForAllVLDThreads();
+        BOOL threadsactive = m_tlsMap->Wait();
 
         if (m_status & VLD_STATUS_NEVER_ENABLED) {
             // Visual Leak Detector started with leak detection disabled and
@@ -639,28 +579,12 @@ VisualLeakDetector::~VisualLeakDetector ()
                 GetLastError());
         }
 
-        {
-            // Free internally allocated resources used by the heapmap and blockmap.
-            CriticalSectionLocker cs(g_heapMapLock);
-            for (HeapMap::Iterator heapit = m_heapMap->begin(); heapit != m_heapMap->end(); ++heapit) {
-                BlockMap *blockmap = &(*heapit).second->blockMap;
-                for (BlockMap::Iterator blockit = blockmap->begin(); blockit != blockmap->end(); ++blockit) {
-                    delete (*blockit).second;
-                }
-                delete blockmap;
-            }
-            delete m_heapMap;
-        }
+        delete m_heapMap;
+
         delete m_loadedModules;
 
-        {
-            // Free internally allocated resources used for thread local storage.
-            CriticalSectionLocker cs(m_tlsLock);
-            for (TlsMap::Iterator tlsit = m_tlsMap->begin(); tlsit != m_tlsMap->end(); ++tlsit) {
-                delete (*tlsit).second;
-            }
-            delete m_tlsMap;
-        }
+        delete m_tlsMap;
+
         if (threadsactive) {
             Report(L"WARNING: Visual Leak Detector: Some threads appear to have not terminated normally.\n"
                 L"  This could cause inaccurate leak detection results, including false positives.\n");
@@ -683,13 +607,7 @@ VisualLeakDetector::~VisualLeakDetector ()
 
     m_optionsLock.Delete();
     m_modulesLock.Delete();
-    m_tlsLock.Delete();
-    g_heapMapLock.Delete();
     g_vldHeapLock.Delete();
-
-    if (m_tlsIndex != TLS_OUT_OF_INDEXES) {
-        TlsFree(m_tlsIndex);
-    }
 
     if (m_reportFile != NULL) {
         fclose(m_reportFile);
@@ -1225,41 +1143,6 @@ BOOL VisualLeakDetector::enabled ()
 //
 //    Returns the number of duplicate blocks erased from the block map.
 //
-SIZE_T VisualLeakDetector::eraseDuplicates (const BlockMap::Iterator &element, Set<blockinfo_t*> &aggregatedLeaks)
-{
-    blockinfo_t *elementinfo = (*element).second;
-
-    if (elementinfo->callStack == NULL)
-        return 0;
-
-    SIZE_T       erased = 0;
-    // Iterate through all block maps, looking for blocks with the same size
-    // and callstack as the specified element.
-    CriticalSectionLocker cs(g_heapMapLock);
-    for (HeapMap::Iterator heapit = m_heapMap->begin(); heapit != m_heapMap->end(); ++heapit) {
-        BlockMap *blockmap = &(*heapit).second->blockMap;
-        for (BlockMap::Iterator blockit = blockmap->begin(); blockit != blockmap->end(); ++blockit) {
-            if (blockit == element) {
-                // Don't delete the element of which we are searching for
-                // duplicates.
-                continue;
-            }
-            blockinfo_t *info = (*blockit).second;
-            if (info->callStack == NULL)
-                continue;
-            Set<blockinfo_t*>::Iterator it = aggregatedLeaks.find(info);
-            if (it != aggregatedLeaks.end())
-                continue;
-            if ((info->size == elementinfo->size) && (*(info->callStack) == *(elementinfo->callStack))) {
-                // Found a duplicate. Mark it.
-                aggregatedLeaks.insert(info);
-                erased++;
-            }
-        }
-    }
-
-    return erased;
-}
 
 // gettls - Obtains the thread local storage structure for the calling thread.
 //
@@ -1270,35 +1153,7 @@ SIZE_T VisualLeakDetector::eraseDuplicates (const BlockMap::Iterator &element, S
 //
 tls_t* VisualLeakDetector::getTls ()
 {
-    // Get the pointer to this thread's thread local storage structure.
-    tls_t* tls = (tls_t*)TlsGetValue(m_tlsIndex);
-    assert(GetLastError() == ERROR_SUCCESS);
-
-    if (tls == NULL) {
-        DWORD threadId = GetCurrentThreadId();
-
-        CriticalSectionLocker cs(m_tlsLock);
-        TlsMap::Iterator it = m_tlsMap->find(threadId);
-        if (it == m_tlsMap->end()) {
-            // This thread's thread local storage structure has not been allocated.
-            tls = new tls_t;
-
-            // Add this thread's TLS to the TlsSet.
-            m_tlsMap->insert(threadId, tls);
-        } else {
-            // Already had a thread with this ID
-            tls = (*it).second;
-        }
-
-        ZeroMemory(&tls->context, sizeof(tls->context));
-        tls->flags = 0x0;
-        tls->oldFlags = 0x0;
-        tls->threadId = threadId;
-        tls->blockWithoutGuard = NULL;
-        TlsSetValue(m_tlsIndex, tls);
-    }
-
-    return tls;
+    return m_tlsMap->Get();
 }
 
 // mapblock - Tracks memory allocations. Information about allocated blocks is
@@ -1321,53 +1176,6 @@ tls_t* VisualLeakDetector::getTls ()
 //
 //    None.
 //
-VOID VisualLeakDetector::mapBlock (HANDLE heap, LPCVOID mem, SIZE_T size, bool debugcrtalloc, DWORD threadId, blockinfo_t* &pblockInfo)
-{
-    CriticalSectionLocker cs(g_heapMapLock);
-
-    // Record the block's information.
-    blockinfo_t* blockinfo = new blockinfo_t();
-    blockinfo->callStack = NULL;
-    pblockInfo = blockinfo;
-    blockinfo->threadId = threadId;
-    blockinfo->serialNumber = m_requestCurr++;
-    blockinfo->size = size;
-    blockinfo->reported = false;
-    blockinfo->debugCrtAlloc = debugcrtalloc;
-
-    if (SIZE_MAX - m_totalAlloc > size)
-        m_totalAlloc += size;
-    else
-        m_totalAlloc = SIZE_MAX;
-    m_curAlloc += size;
-
-    if (m_curAlloc > m_maxAlloc)
-        m_maxAlloc = m_curAlloc;
-
-    // Insert the block's information into the block map.
-    HeapMap::Iterator heapit = m_heapMap->find(heap);
-    if (heapit == m_heapMap->end()) {
-        // We haven't mapped this heap to a block map yet. Do it now.
-        mapHeap(heap);
-        heapit = m_heapMap->find(heap);
-        assert(heapit != m_heapMap->end());
-    }
-    BlockMap* blockmap = &(*heapit).second->blockMap;
-    BlockMap::Iterator blockit = blockmap->insert(mem, blockinfo);
-    if (blockit == blockmap->end()) {
-        // A block with this address has already been allocated. The
-        // previously allocated block must have been freed (probably by some
-        // mechanism unknown to VLD), or the heap wouldn't have allocated it
-        // again. Replace the previously allocated info with the new info.
-        blockit = blockmap->find(mem);
-        blockinfo_t* info = (*blockit).second;
-        m_curAlloc -= info->size;
-        Report(L"VLD: New allocation at already allocated address: 0x%p with size: %u and new size: %u\n", mem, info->size, size);
-        delete info;
-        blockmap->erase(blockit);
-        blockmap->insert(mem, blockinfo);
-    }
-}
 
 // mapheap - Tracks heap creation. Creates a block map for tracking individual
 //   allocations from the newly created heap and then maps the heap to this
@@ -1379,26 +1187,6 @@ VOID VisualLeakDetector::mapBlock (HANDLE heap, LPCVOID mem, SIZE_T size, bool d
 //
 //    None.
 //
-VOID VisualLeakDetector::mapHeap (HANDLE heap)
-{
-    CriticalSectionLocker cs(g_heapMapLock);
-
-    // Create a new block map for this heap and insert it into the heap map.
-    heapinfo_t* heapinfo = new heapinfo_t;
-    heapinfo->blockMap.reserve(BLOCK_MAP_RESERVE);
-    heapinfo->flags = 0x0;
-
-    HeapMap::Iterator heapit = m_heapMap->insert(heap, heapinfo);
-    if (heapit == m_heapMap->end()) {
-        // Somehow this heap has been created twice without being destroyed,
-        // or at least it was destroyed without VLD's knowledge. Unmap the heap
-        // from the existing heapinfo, and remap it to the new one.
-        Report(L"WARNING: Visual Leak Detector detected a duplicate heap (" ADDRESSFORMAT L").\n", heap);
-        heapit = m_heapMap->find(heap);
-        unmapHeap((*heapit).first);
-        m_heapMap->insert(heap, heapinfo);
-    }
-}
 
 // unmapblock - Tracks memory blocks that are freed. Unmaps the specified block
 //   from the block's information, relinquishing internally allocated resources.
@@ -1411,68 +1199,6 @@ VOID VisualLeakDetector::mapHeap (HANDLE heap)
 //
 //    None.
 //
-VOID VisualLeakDetector::unmapBlock (HANDLE heap, LPCVOID mem, const context_t &context)
-{
-    if (NULL == mem)
-        return;
-
-    // Find this heap's block map.
-    CriticalSectionLocker cs(g_heapMapLock);
-    HeapMap::Iterator heapit = m_heapMap->find(heap);
-    if (heapit == m_heapMap->end()) {
-        // We don't have a block map for this heap. We must not have monitored
-        // this allocation (probably happened before VLD was initialized).
-        return;
-    }
-
-    // Find this block in the block map.
-    BlockMap           *blockmap = &(*heapit).second->blockMap;
-    BlockMap::Iterator  blockit = blockmap->find(mem);
-    if (blockit == blockmap->end())
-    {
-        // This memory block is not in the block map. We must not have monitored this
-        // allocation (probably happened before VLD was initialized).
-
-        // This can also result from allocating on one heap, and freeing on another heap.
-        // This is an especially bad way to corrupt the application.
-        // Now we have to search through every heap and every single block in each to make
-        // sure that this is indeed the case.
-        if (m_options & VLD_OPT_VALIDATE_HEAPFREE)
-        {
-            HANDLE other_heap = NULL;
-            blockinfo_t* alloc_block = findAllocedBlock(mem, other_heap); // other_heap is an out parameter
-            bool diff = other_heap != heap; // Check indeed if the other heap is different
-            if (alloc_block && alloc_block->callStack && diff)
-            {
-                Report(L"CRITICAL ERROR!: VLD reports that memory was allocated in one heap and freed in another.\nThis will result in a corrupted heap.\nAllocation Call stack.\n");
-                Report(L"---------- Block %Iu at " ADDRESSFORMAT L": %Iu bytes ----------\n", alloc_block->serialNumber, mem, alloc_block->size);
-                Report(L"  TID: %u\n", alloc_block->threadId);
-                Report(L"  Call Stack:\n");
-                alloc_block->callStack->dump(m_options & VLD_OPT_TRACE_INTERNAL_FRAMES);
-
-                // Now we need a way to print the current callstack at this point:
-                CallStack* stack_here = CallStack::Create();
-                stack_here->getStackTrace(m_maxTraceFrames, context);
-                Report(L"Deallocation Call stack.\n");
-                Report(L"---------- Block %Iu at " ADDRESSFORMAT L": %Iu bytes ----------\n", alloc_block->serialNumber, mem, alloc_block->size);
-                Report(L"  Call Stack:\n");
-                stack_here->dump(FALSE);
-                // Now it should be safe to delete our temporary callstack
-                delete stack_here;
-                stack_here = NULL;
-                if (IsDebuggerPresent())
-                    DebugBreak();
-            }
-        }
-        return;
-    }
-
-    // Free the blockinfo_t structure and erase it from the block map.
-    blockinfo_t *info = (*blockit).second;
-    m_curAlloc -= info->size;
-    delete info;
-    blockmap->erase(blockit);
-}
 
 // unmapheap - Tracks heap destruction. Unmaps the specified heap from its block
 //   map. The block map is cleared and deleted, relinquishing internally
@@ -1484,29 +1210,6 @@ VOID VisualLeakDetector::unmapBlock (HANDLE heap, LPCVOID mem, const context_t &
 //
 //    None.
 //
-VOID VisualLeakDetector::unmapHeap (HANDLE heap)
-{
-    // Find this heap's block map.
-    CriticalSectionLocker cs(g_heapMapLock);
-    HeapMap::Iterator heapit = m_heapMap->find(heap);
-    if (heapit == m_heapMap->end()) {
-        // This heap hasn't been mapped. We must not have monitored this heap's
-        // creation (probably happened before VLD was initialized).
-        return;
-    }
-
-    // Free all of the blockinfo_t structures stored in the block map.
-    heapinfo_t *heapinfo = (*heapit).second;
-    BlockMap   *blockmap = &heapinfo->blockMap;
-    for (BlockMap::Iterator blockit = blockmap->begin(); blockit != blockmap->end(); ++blockit) {
-        m_curAlloc -= (*blockit).second->size;
-        delete (*blockit).second;
-    }
-    delete heapinfo;
-
-    // Remove this heap's block map from the heap map.
-    m_heapMap->erase(heapit);
-}
 
 // remapblock - Tracks reallocations. Unmaps a block from its previously
 //   collected information and remaps it to updated information.
@@ -1535,69 +1238,6 @@ VOID VisualLeakDetector::unmapHeap (HANDLE heap)
 //
 //    None.
 //
-VOID VisualLeakDetector::remapBlock (HANDLE heap, LPCVOID mem, LPCVOID newmem, SIZE_T size,
-    bool debugcrtalloc, DWORD threadId, blockinfo_t* &pblockInfo, const context_t &context)
-{
-    CriticalSectionLocker cs(g_heapMapLock);
-
-    if (newmem != mem) {
-        // The block was not reallocated in-place. Instead the old block was
-        // freed and a new block allocated to satisfy the new size.
-        unmapBlock(heap, mem, context);
-        mapBlock(heap, newmem, size, debugcrtalloc, threadId, pblockInfo);
-        return;
-    }
-
-    // The block was reallocated in-place. Find the existing blockinfo_t
-    // entry in the block map and update it with the new callstack and size.
-    HeapMap::Iterator heapit = m_heapMap->find(heap);
-    if (heapit == m_heapMap->end()) {
-        // We haven't mapped this heap to a block map yet. Obviously the
-        // block has also not been mapped to a blockinfo_t entry yet either,
-        // so treat this reallocation as a brand-new allocation (this will
-        // also map the heap to a new block map).
-        mapBlock(heap, newmem, size, debugcrtalloc, threadId, pblockInfo);
-        return;
-    }
-
-    // Find the block's blockinfo_t structure so that we can update it.
-    BlockMap           *blockmap = &(*heapit).second->blockMap;
-    BlockMap::Iterator  blockit = blockmap->find(mem);
-    if (blockit == blockmap->end()) {
-        // The block hasn't been mapped to a blockinfo_t entry yet.
-        // Treat this reallocation as a new allocation.
-        mapBlock(heap, newmem, size, debugcrtalloc, threadId, pblockInfo);
-        return;
-    }
-
-    // Found the blockinfo_t entry for this block. Update it with
-    // a new callstack and new size.
-    blockinfo_t* info = (*blockit).second;
-    if (info->callStack)
-    {
-        info->callStack.reset();
-    }
-
-    if (m_totalAlloc < SIZE_MAX)
-    {
-        m_totalAlloc -= info->size;
-        if (SIZE_MAX - m_totalAlloc > size)
-            m_totalAlloc += size;
-        else
-            m_totalAlloc = SIZE_MAX;
-    }
-
-    m_curAlloc -= info->size;
-    m_curAlloc += size;
-
-    if (m_curAlloc > m_maxAlloc)
-        m_maxAlloc = m_curAlloc;
-
-    info->threadId = threadId;
-    // Update the block's size.
-    info->size = size;
-    pblockInfo = info;
-}
 
 // reportconfig - Generates a brief report summarizing Visual Leak Detector's
 //   configuration, as loaded from the vld.ini file.
@@ -1663,59 +1303,6 @@ VOID VisualLeakDetector::reportConfig ()
 //
 //    None.
 //
-SIZE_T VisualLeakDetector::getLeaksCount (heapinfo_t* heapinfo, DWORD threadId)
-{
-    BlockMap* blockmap   = &heapinfo->blockMap;
-    SIZE_T memoryleaks = 0;
-
-    for (BlockMap::Iterator blockit = blockmap->begin(); blockit != blockmap->end(); ++blockit)
-    {
-        // Found a block which is still in the BlockMap. We've identified a
-        // potential memory leak.
-        LPCVOID block = (*blockit).first;
-        blockinfo_t* info = (*blockit).second;
-        if (info->reported)
-            continue;
-
-        if (threadId != ((DWORD)-1) && info->threadId != threadId)
-            continue;
-
-        if (!info->debugCrtAlloc) {
-            crtdbgblockheader_t* crtheader = (crtdbgblockheader_t*)block;
-            SIZE_T nSize = sizeof(crtdbgblockheader_t) + crtheader->size + GAPSIZE;
-            int nValid = _CrtIsValidPointer(block, (unsigned int)info->size, TRUE);
-            if (_BLOCK_TYPE_IS_VALID(crtheader->use) && nValid && (nSize == info->size)) {
-                info->debugCrtAlloc = true;
-            }
-        }
-
-        if (info->debugCrtAlloc) {
-            // This block is allocated to a CRT heap, so the block has a CRT
-            // memory block header pretended to it.
-            crtdbgblockheader_t* crtheader = (crtdbgblockheader_t*)block;
-            // Leaks identified as CRT_USE_IGNORE should not be ignored here otherwise
-            // DynamicLoader/Thread test will randomly fail with less leaks being reported.
-            if (CRT_USE_TYPE(crtheader->use) == CRT_USE_FREE ||
-                CRT_USE_TYPE(crtheader->use) == CRT_USE_INTERNAL) {
-                // This block is marked as being used internally by the CRT.
-                // The CRT will free the block after VLD is destroyed.
-                continue;
-            }
-        }
-
-        if (!info->debugCrtAlloc && (m_options & VLD_OPT_SKIP_CRTSTARTUP_LEAKS)) {
-            // Check for crt startup allocations
-            if (info->callStack && info->callStack->isCrtStartupAlloc()) {
-                info->reported = true;
-                continue;
-            }
-        }
-
-        memoryleaks ++;
-    }
-
-    return memoryleaks;
-}
 
 // reportleaks - Generates a memory leak report for the specified heap.
 //
@@ -1726,161 +1313,8 @@ SIZE_T VisualLeakDetector::getLeaksCount (heapinfo_t* heapinfo, DWORD threadId)
 //
 //    None.
 //
-SIZE_T VisualLeakDetector::reportHeapLeaks (HANDLE heap)
-{
-    assert(heap != NULL);
 
-    // Find the heap's information (blockmap, etc).
-    CriticalSectionLocker cs(g_heapMapLock);
-    HeapMap::Iterator heapit = m_heapMap->find(heap);
-    if (heapit == m_heapMap->end()) {
-        // Nothing is allocated from this heap. No leaks.
-        return 0;
-    }
 
-    Set<blockinfo_t*> aggregatedLeaks;
-    heapinfo_t* heapinfo = (*heapit).second;
-    // Generate a memory leak report for heap.
-    bool firstLeak = true;
-    SIZE_T leaks_count = reportLeaks(heapinfo, firstLeak, aggregatedLeaks);
-
-    // Show a summary.
-    if (leaks_count != 0) {
-        Report(L"Visual Leak Detector detected %Iu memory leak%s in heap " ADDRESSFORMAT L"\n",
-            leaks_count, (leaks_count > 1) ? L"s" : L"", heap);
-     }
-    return leaks_count;
-}
-
-SIZE_T VisualLeakDetector::reportLeaks (heapinfo_t* heapinfo, bool &firstLeak, Set<blockinfo_t*> &aggregatedLeaks, DWORD threadId)
-{
-    BlockMap* blockmap   = &heapinfo->blockMap;
-    SIZE_T leaksFound = 0;
-
-    for (BlockMap::Iterator blockit = blockmap->begin(); blockit != blockmap->end(); ++blockit)
-    {
-        // Found a block which is still in the BlockMap. We've identified a
-        // potential memory leak.
-        LPCVOID block = (*blockit).first;
-        blockinfo_t* info = (*blockit).second;
-        if (info->reported)
-            continue;
-
-        if (threadId != ((DWORD)-1) && info->threadId != threadId)
-            continue;
-
-        Set<blockinfo_t*>::Iterator it = aggregatedLeaks.find(info);
-        if (it != aggregatedLeaks.end())
-            continue;
-
-        LPCVOID address = block;
-        SIZE_T size = info->size;
-
-        if (!info->debugCrtAlloc) {
-            crtdbgblockheader_t* crtheader = (crtdbgblockheader_t*)block;
-            SIZE_T nSize = sizeof(crtdbgblockheader_t) + crtheader->size + GAPSIZE;
-            int nValid = _CrtIsValidPointer(block, (unsigned int)info->size, TRUE);
-            if (_BLOCK_TYPE_IS_VALID(crtheader->use) && nValid && (nSize == info->size)) {
-                info->debugCrtAlloc = true;
-            }
-        }
-
-        if (info->debugCrtAlloc) {
-            // This block is allocated to a CRT heap, so the block has a CRT
-            // memory block header pretended to it.
-            crtdbgblockheader_t* crtheader = (crtdbgblockheader_t*)block;
-            // Leaks identified as CRT_USE_IGNORE should not be ignored here otherwise
-            // DynamicLoader/Thread test will randomly fail with less leaks being reported.
-            if (CRT_USE_TYPE(crtheader->use) == CRT_USE_FREE ||
-                CRT_USE_TYPE(crtheader->use) == CRT_USE_INTERNAL)
-            {
-                // This block is marked as being used internally by the CRT.
-                // The CRT will free the block after VLD is destroyed.
-                continue;
-            }
-            // The CRT header is more or less transparent to the user, so
-            // the information about the contained block will probably be
-            // more useful to the user. Accordingly, that's the information
-            // we'll include in the report.
-            address = CRTDBGBLOCKDATA(block);
-            size = crtheader->size;
-        }
-
-        if (!info->debugCrtAlloc && (m_options & VLD_OPT_SKIP_CRTSTARTUP_LEAKS)) {
-            // Check for crt startup allocations
-            if (info->callStack && info->callStack->isCrtStartupAlloc()) {
-                info->reported = true;
-                continue;
-            }
-        }
-
-        // It looks like a real memory leak.
-        if (firstLeak) { // A confusing way to only display this message once
-            Report(L"WARNING: Visual Leak Detector detected memory leaks!\n");
-            firstLeak = false;
-        }
-        SIZE_T blockLeaksCount = 1;
-        Report(L"---------- Block %Iu at " ADDRESSFORMAT L": %Iu bytes ----------\n", info->serialNumber, address, size);
-#ifdef _DEBUG
-        if (info->debugCrtAlloc)
-        {
-            crtdbgblockheader_t* crtheader = (crtdbgblockheader_t*)block;
-            Report(L"  CRT Alloc ID: %Iu\n", crtheader->request);
-            assert(size == crtheader->size);
-        }
-#endif
-        assert(info->callStack);
-        if (m_options & VLD_OPT_AGGREGATE_DUPLICATES) {
-            // Aggregate all other leaks which are duplicates of this one
-            // under this same heading, to cut down on clutter.
-            SIZE_T erased = eraseDuplicates(blockit, aggregatedLeaks);
-
-            // add only the number that were erased, since the 'one left over'
-            // is already recorded as a leak
-            blockLeaksCount += erased;
-        }
-
-        DWORD callstackCRC = 0;
-        if (info->callStack)
-            callstackCRC = CalculateCRC32(info->size, info->callStack->getHashValue());
-        Report(L"  Leak Hash: 0x%08X, Count: %Iu, Total %Iu bytes\n", callstackCRC, blockLeaksCount, size * blockLeaksCount);
-        leaksFound += blockLeaksCount;
-
-        // Dump the call stack.
-        if (blockLeaksCount == 1)
-            Report(L"  Call Stack (TID %u):\n", info->threadId);
-        else
-            Report(L"  Call Stack:\n");
-        if (info->callStack)
-            info->callStack->dump(m_options & VLD_OPT_TRACE_INTERNAL_FRAMES);
-
-        // Dump the data in the user data section of the memory block.
-        if (m_maxDataDump != 0) {
-            Report(L"  Data:\n");
-            if (m_options & VLD_OPT_UNICODE_REPORT) {
-                DumpMemoryW(address, (m_maxDataDump < size) ? m_maxDataDump : size);
-            }
-            else {
-                DumpMemoryA(address, (m_maxDataDump < size) ? m_maxDataDump : size);
-            }
-        }
-        Report(L"\n\n");
-    }
-
-    return leaksFound;
-}
-
-VOID VisualLeakDetector::markAllLeaksAsReported (heapinfo_t* heapinfo, DWORD threadId)
-{
-    BlockMap* blockmap   = &heapinfo->blockMap;
-
-    for (BlockMap::Iterator blockit = blockmap->begin(); blockit != blockmap->end(); ++blockit)
-    {
-        blockinfo_t* info = (*blockit).second;
-        if (threadId == ((DWORD)-1) || info->threadId == threadId)
-            info->reported = true;
-    }
-}
 
 // FindAllocedBlock - Find if a particular memory allocation is tracked inside of VLD.
 //     This is a really good example of how to iterate through the data structures
@@ -1893,44 +1327,6 @@ VOID VisualLeakDetector::markAllLeaksAsReported (heapinfo_t* heapinfo, DWORD thr
 //  Return Value:
 //   If mem is found, it will return the blockinfo_t pointer, otherwise NULL
 //
-blockinfo_t* VisualLeakDetector::findAllocedBlock(LPCVOID mem, __out HANDLE& heap)
-{
-    heap = NULL;
-    blockinfo_t* result = NULL;
-    // Iterate through all heaps
-    CriticalSectionLocker cs(g_heapMapLock);
-    for (HeapMap::Iterator it = m_heapMap->begin();
-        it != m_heapMap->end();
-        ++it)
-    {
-        HANDLE heap_handle  = (*it).first;
-        (heap_handle); // unused
-        heapinfo_t* heapPtr = (*it).second;
-
-        // Iterate through all memory blocks in each heap
-        BlockMap& p_block_map = heapPtr->blockMap;
-        for (BlockMap::Iterator iter = p_block_map.begin();
-            iter != p_block_map.end();
-            ++iter)
-        {
-            if ((*iter).first == mem)
-            {
-                // Found the block.
-                blockinfo_t* alloc_block = (*iter).second;
-                heap = heap_handle;
-                result = alloc_block;
-                break;
-            }
-        }
-
-        if (result)
-        {
-            break;
-        }
-    }
-
-    return result;
-}
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -2306,16 +1702,8 @@ SIZE_T VisualLeakDetector::GetLeaksCount()
         return 0;
     }
 
-    SIZE_T leaksCount = 0;
     // Generate a memory leak report for each heap in the process.
-    CriticalSectionLocker cs(g_heapMapLock);
-    for (HeapMap::Iterator heapit = m_heapMap->begin(); heapit != m_heapMap->end(); ++heapit) {
-        HANDLE heap = (*heapit).first;
-        UNREFERENCED_PARAMETER(heap);
-        heapinfo_t* heapinfo = (*heapit).second;
-        leaksCount += getLeaksCount(heapinfo);
-    }
-    return leaksCount;
+    return m_heapMap->GetLeakCount();
 }
 
 SIZE_T VisualLeakDetector::GetThreadLeaksCount(DWORD threadId)
@@ -2325,16 +1713,8 @@ SIZE_T VisualLeakDetector::GetThreadLeaksCount(DWORD threadId)
         return 0;
     }
 
-    SIZE_T leaksCount = 0;
     // Generate a memory leak report for each heap in the process.
-    CriticalSectionLocker cs(g_heapMapLock);
-    for (HeapMap::Iterator heapit = m_heapMap->begin(); heapit != m_heapMap->end(); ++heapit) {
-        HANDLE heap = (*heapit).first;
-        UNREFERENCED_PARAMETER(heap);
-        heapinfo_t* heapinfo = (*heapit).second;
-        leaksCount += getLeaksCount(heapinfo, threadId);
-    }
-    return leaksCount;
+    return m_heapMap->GetLeakCount(threadId);
 }
 
 SIZE_T VisualLeakDetector::ReportLeaks( )
@@ -2345,17 +1725,7 @@ SIZE_T VisualLeakDetector::ReportLeaks( )
     }
 
     // Generate a memory leak report for each heap in the process.
-    SIZE_T leaksCount = 0;
-    CriticalSectionLocker cs(g_heapMapLock);
-    bool firstLeak = true;
-    Set<blockinfo_t*> aggregatedLeaks;
-    for (HeapMap::Iterator heapit = m_heapMap->begin(); heapit != m_heapMap->end(); ++heapit) {
-        HANDLE heap = (*heapit).first;
-        UNREFERENCED_PARAMETER(heap);
-        heapinfo_t* heapinfo = (*heapit).second;
-        leaksCount += reportLeaks(heapinfo, firstLeak, aggregatedLeaks);
-    }
-    return leaksCount;
+    return m_heapMap->ReportLeaks();
 }
 
 SIZE_T VisualLeakDetector::ReportThreadLeaks( DWORD threadId )
@@ -2366,17 +1736,7 @@ SIZE_T VisualLeakDetector::ReportThreadLeaks( DWORD threadId )
     }
 
     // Generate a memory leak report for each heap in the process.
-    SIZE_T leaksCount = 0;
-    CriticalSectionLocker cs(g_heapMapLock);
-    bool firstLeak = true;
-    Set<blockinfo_t*> aggregatedLeaks;
-    for (HeapMap::Iterator heapit = m_heapMap->begin(); heapit != m_heapMap->end(); ++heapit) {
-        HANDLE heap = (*heapit).first;
-        UNREFERENCED_PARAMETER(heap);
-        heapinfo_t* heapinfo = (*heapit).second;
-        leaksCount += reportLeaks(heapinfo, firstLeak, aggregatedLeaks, threadId);
-    }
-    return leaksCount;
+    return m_heapMap->ReportLeaks(threadId);
 }
 
 VOID VisualLeakDetector::MarkAllLeaksAsReported( )
@@ -2387,13 +1747,7 @@ VOID VisualLeakDetector::MarkAllLeaksAsReported( )
     }
 
     // Generate a memory leak report for each heap in the process.
-    CriticalSectionLocker cs(g_heapMapLock);
-    for (HeapMap::Iterator heapit = m_heapMap->begin(); heapit != m_heapMap->end(); ++heapit) {
-        HANDLE heap = (*heapit).first;
-        UNREFERENCED_PARAMETER(heap);
-        heapinfo_t* heapinfo = (*heapit).second;
-        markAllLeaksAsReported(heapinfo);
-    }
+    return m_heapMap->MarkAllAsReported();
 }
 
 VOID VisualLeakDetector::MarkThreadLeaksAsReported( DWORD threadId )
@@ -2404,13 +1758,7 @@ VOID VisualLeakDetector::MarkThreadLeaksAsReported( DWORD threadId )
     }
 
     // Generate a memory leak report for each heap in the process.
-    CriticalSectionLocker cs(g_heapMapLock);
-    for (HeapMap::Iterator heapit = m_heapMap->begin(); heapit != m_heapMap->end(); ++heapit) {
-        HANDLE heap = (*heapit).first;
-        UNREFERENCED_PARAMETER(heap);
-        heapinfo_t* heapinfo = (*heapit).second;
-        markAllLeaksAsReported(heapinfo, threadId);
-    }
+    m_heapMap->MarkAllAsReported(threadId);
 }
 
 void VisualLeakDetector::ChangeModuleState(HMODULE module, bool on)
@@ -2457,8 +1805,6 @@ void VisualLeakDetector::DisableModule(HMODULE module)
 
 void VisualLeakDetector::DisableLeakDetection ()
 {
-    tls_t *tls;
-
     if (m_options & VLD_OPT_VLDOFF) {
         // VLD has been turned off.
         return;
@@ -2468,10 +1814,7 @@ void VisualLeakDetector::DisableLeakDetection ()
     // because if neither flag is set, it means that we are in the default or
     // "starting" state, which could be either enabled or disabled depending on
     // the configuration.
-    tls = getTls();
-    tls->oldFlags = tls->flags;
-    tls->flags &= ~VLD_TLS_ENABLED;
-    tls->flags |= VLD_TLS_DISABLED;
+    m_tlsMap->Enable(FALSE);
 }
 
 void VisualLeakDetector::EnableLeakDetection ()
@@ -2481,29 +1824,19 @@ void VisualLeakDetector::EnableLeakDetection ()
         return;
     }
 
-    tls_t *tls;
-
     // Enable memory leak detection for the current thread.
-    tls = getTls();
-    tls->oldFlags = tls->flags;
-    tls->flags &= ~VLD_TLS_DISABLED;
-    tls->flags |= VLD_TLS_ENABLED;
-    m_status &= ~VLD_STATUS_NEVER_ENABLED;
+    m_tlsMap->Enable(TRUE);
 }
 
 void VisualLeakDetector::RestoreLeakDetectionState ()
 {
-    tls_t *tls;
-
     if (m_options & VLD_OPT_VLDOFF) {
         // VLD has been turned off.
         return;
     }
 
     // Restore state memory leak detection for the current thread.
-    tls = getTls();
-    tls->flags &= ~(VLD_TLS_DISABLED | VLD_TLS_ENABLED);
-    tls->flags |= tls->oldFlags & (VLD_TLS_DISABLED | VLD_TLS_ENABLED);
+    m_tlsMap->Enable(-1);
 }
 
 void VisualLeakDetector::GlobalDisableLeakDetection ()
@@ -2517,13 +1850,7 @@ void VisualLeakDetector::GlobalDisableLeakDetection ()
     m_options |= VLD_OPT_START_DISABLED;
 
     // Disable memory leak detection for all threads.
-    CriticalSectionLocker cstls(m_tlsLock);
-    TlsMap::Iterator     tlsit;
-    for (tlsit = m_tlsMap->begin(); tlsit != m_tlsMap->end(); ++tlsit) {
-        (*tlsit).second->oldFlags = (*tlsit).second->flags;
-        (*tlsit).second->flags &= ~VLD_TLS_ENABLED;
-        (*tlsit).second->flags |= VLD_TLS_DISABLED;
-    }
+    m_tlsMap->EnableAll(FALSE);
 }
 
 void VisualLeakDetector::GlobalEnableLeakDetection ()
@@ -2538,13 +1865,7 @@ void VisualLeakDetector::GlobalEnableLeakDetection ()
     m_status &= ~VLD_STATUS_NEVER_ENABLED;
 
     // Enable memory leak detection for all threads.
-    CriticalSectionLocker cstls(m_tlsLock);
-    TlsMap::Iterator     tlsit;
-    for (tlsit = m_tlsMap->begin(); tlsit != m_tlsMap->end(); ++tlsit) {
-        (*tlsit).second->oldFlags = (*tlsit).second->flags;
-        (*tlsit).second->flags &= ~VLD_TLS_DISABLED;
-        (*tlsit).second->flags |= VLD_TLS_ENABLED;
-    }
+    m_tlsMap->EnableAll(TRUE);
 }
 
 CONST UINT32 OptionsMask = VLD_OPT_AGGREGATE_DUPLICATES | VLD_OPT_MODULE_LIST_INCLUDE |
@@ -2722,88 +2043,15 @@ void VisualLeakDetector::setupReporting()
     }
 }
 
-int VisualLeakDetector::resolveStacks(heapinfo_t* heapinfo)
-{
-    int unresolvedFunctionsCount = 0;
-    BlockMap& blockmap = heapinfo->blockMap;
 
-    for (BlockMap::Iterator blockit = blockmap.begin(); blockit != blockmap.end(); ++blockit) {
-        // Found a block which is still in the BlockMap. We've identified a
-        // potential memory leak.
-        const void* block   = (*blockit).first;
-        blockinfo_t* info   = (*blockit).second;
-        assert(info);
-        if (info == NULL)
-        {
-            continue;
-        }
-
-        if (info->reported) {
-            continue;
-        }
-
-        // The actual memory address
-        const void* address = block;
-        assert(address != NULL);
-
-        if (!info->debugCrtAlloc) {
-            crtdbgblockheader_t* crtheader = (crtdbgblockheader_t*)block;
-            SIZE_T nSize = sizeof(crtdbgblockheader_t) + crtheader->size + GAPSIZE;
-            int nValid = _CrtIsValidPointer(block, (unsigned int)info->size, TRUE);
-            if (_BLOCK_TYPE_IS_VALID(crtheader->use) && nValid && (nSize == info->size)) {
-                info->debugCrtAlloc = true;
-            }
-        }
-
-        if (info->debugCrtAlloc) {
-            // This block is allocated to a CRT heap, so the block has a CRT
-            // memory block header prepended to it.
-            crtdbgblockheader_t* crtheader = (crtdbgblockheader_t*)block;
-            if (!crtheader)
-                continue;
-
-            // Leaks identified as CRT_USE_IGNORE should not be ignored here otherwise
-            // DynamicLoader/Thread test will randomly fail with less leaks being reported.
-            if (CRT_USE_TYPE(crtheader->use) == CRT_USE_FREE ||
-                CRT_USE_TYPE(crtheader->use) == CRT_USE_INTERNAL)
-            {
-                // This block is marked as being used internally by the CRT.
-                // The CRT will free the block after VLD is destroyed.
-                continue;
-            }
-        }
-
-        // Dump the call stack.
-        if (info->callStack)
-        {
-            unresolvedFunctionsCount += info->callStack->resolve(m_options & VLD_OPT_TRACE_INTERNAL_FRAMES);
-            if ((m_options & VLD_OPT_SKIP_CRTSTARTUP_LEAKS) && info->callStack->isCrtStartupAlloc()) {
-                info->reported = true;
-                continue;
-            }
-        }
-    }
-    return unresolvedFunctionsCount;
-}
-
-int VisualLeakDetector::ResolveCallstacks()
+SIZE_T VisualLeakDetector::ResolveCallstacks()
 {
     LoaderLock ll;
 
     if (m_options & VLD_OPT_VLDOFF)
         return 0;
 
-    int unresolvedFunctionsCount = 0;
-    // Generate the Callstacks early
-    CriticalSectionLocker cs(g_heapMapLock);
-    for (HeapMap::Iterator heapiter = m_heapMap->begin(); heapiter != m_heapMap->end(); ++heapiter)
-    {
-        HANDLE heap = (*heapiter).first;
-        UNREFERENCED_PARAMETER(heap);
-        heapinfo_t* heapinfo = (*heapiter).second;
-        unresolvedFunctionsCount += resolveStacks(heapinfo);
-    }
-    return unresolvedFunctionsCount;
+    return m_heapMap->Resolve();
 }
 
 CaptureContext::CaptureContext(context_t &context, BOOL debug, void* func, UINT_PTR fp) {
@@ -2844,20 +2092,19 @@ CaptureContext::~CaptureContext() {
         if ((!m_bExclude) && (m_tls->blockWithoutGuard)) {
             blockinfo_t* pblockInfo = NULL;
             if (m_tls->newBlockWithoutGuard == NULL) {
-                g_vld.mapBlock(m_tls->heap,
+                pblockInfo = g_vld.m_heapMap->MapBlock(m_tls->heap,
                     m_tls->blockWithoutGuard,
                     m_tls->size,
                     (m_tls->flags & VLD_TLS_DEBUGCRTALLOC),
-                    m_tls->threadId,
-                    pblockInfo);
+                    m_tls->threadId);
             } else {
-                g_vld.remapBlock(m_tls->heap,
+                pblockInfo = g_vld.m_heapMap->ReMapBlock(m_tls->heap,
                     m_tls->blockWithoutGuard,
                     m_tls->newBlockWithoutGuard,
                     m_tls->size,
                     (m_tls->flags & VLD_TLS_DEBUGCRTALLOC),
                     m_tls->threadId,
-                    pblockInfo, m_tls->context);
+                    m_tls->context);
             }
             CallStack* callstack;
             g_vld.getCallStack(callstack, m_tls->context);
@@ -2876,4 +2123,901 @@ void CaptureContext::Set(HANDLE heap, LPVOID mem, LPVOID newmem, SIZE_T size) {
     m_tls->blockWithoutGuard = mem;
     m_tls->newBlockWithoutGuard = newmem;
     m_tls->size = size;
+}
+
+
+void BlockMap::Clear(BOOL bUpdate) {
+    for (BlockMap::Iterator blockit = begin(); blockit != end(); ++blockit) {
+        if (bUpdate) {
+            g_vld.m_curAlloc -= (*blockit).second->size;
+        }
+        (*blockit).second->callStack.reset();
+        delete (*blockit).second;
+    }
+}
+
+size_t BlockMap::GetLeakCount(DWORD threadId) {
+    size_t memoryleaks = 0;
+
+    for (BlockMap::Iterator blockit = begin(); blockit != end(); ++blockit) {
+        // Found a block which is still in the BlockMap. We've identified a
+        // potential memory leak.
+        LPCVOID block = (*blockit).first;
+        blockinfo_t* info = (*blockit).second;
+        if (info->reported)
+            continue;
+
+        if (threadId != ((DWORD)-1) && info->threadId != threadId)
+            continue;
+
+        if (!info->debugCrtAlloc) {
+            crtdbgblockheader_t* crtheader = (crtdbgblockheader_t*)block;
+            SIZE_T nSize = sizeof(crtdbgblockheader_t) + crtheader->size + GAPSIZE;
+            int nValid = _CrtIsValidPointer(block, (unsigned int)info->size, TRUE);
+            if (_BLOCK_TYPE_IS_VALID(crtheader->use) && nValid && (nSize == info->size)) {
+                info->debugCrtAlloc = true;
+            }
+        }
+
+        if (info->debugCrtAlloc) {
+            // This block is allocated to a CRT heap, so the block has a CRT
+            // memory block header pretended to it.
+            crtdbgblockheader_t* crtheader = (crtdbgblockheader_t*)block;
+            // Leaks identified as CRT_USE_IGNORE should not be ignored here otherwise
+            // DynamicLoader/Thread test will randomly fail with less leaks being reported.
+            if (CRT_USE_TYPE(crtheader->use) == CRT_USE_FREE ||
+                CRT_USE_TYPE(crtheader->use) == CRT_USE_INTERNAL) {
+                // This block is marked as being used internally by the CRT.
+                // The CRT will free the block after VLD is destroyed.
+                continue;
+            }
+        }
+
+        if (!info->debugCrtAlloc && (g_vld.m_options & VLD_OPT_SKIP_CRTSTARTUP_LEAKS)) {
+            // Check for crt startup allocations
+            if (info->callStack && info->callStack->isCrtStartupAlloc()) {
+                info->reported = true;
+                continue;
+            }
+        }
+
+        ++memoryleaks;
+    }
+
+    return memoryleaks;
+}
+
+size_t HeapMap::Resolve() {
+    CriticalSectionLocker cs(m_lock);
+
+    size_t nCount = 0;
+
+    // Generate the Callstacks early
+    for (HeapMap::Iterator heapit = begin(); heapit != end(); ++heapit) {
+        heapinfo_t* heapinfo = (*heapit).second;
+        BlockMap& blockmap = heapinfo->blockMap;
+        nCount += blockmap.Resolve();
+    }
+    return nCount;
+}
+
+size_t BlockMap::Resolve() {
+    size_t nCount = 0;
+
+    for (BlockMap::Iterator blockit = begin(); blockit != end(); ++blockit) {
+        // Found a block which is still in the BlockMap. We've identified a
+        // potential memory leak.
+        const void* block = (*blockit).first;
+        blockinfo_t* info = (*blockit).second;
+        assert(info);
+        if (info == NULL) {
+            continue;
+        }
+
+        if (info->reported) {
+            continue;
+        }
+
+        // The actual memory address
+        const void* address = block;
+        assert(address != NULL);
+
+        if (!info->debugCrtAlloc) {
+            crtdbgblockheader_t* crtheader = (crtdbgblockheader_t*)block;
+            SIZE_T nSize = sizeof(crtdbgblockheader_t) + crtheader->size + GAPSIZE;
+            int nValid = _CrtIsValidPointer(block, (unsigned int)info->size, TRUE);
+            if (_BLOCK_TYPE_IS_VALID(crtheader->use) && nValid && (nSize == info->size)) {
+                info->debugCrtAlloc = true;
+            }
+        }
+
+        if (info->debugCrtAlloc) {
+            // This block is allocated to a CRT heap, so the block has a CRT
+            // memory block header prepended to it.
+            crtdbgblockheader_t* crtheader = (crtdbgblockheader_t*)block;
+            if (!crtheader)
+                continue;
+
+            // Leaks identified as CRT_USE_IGNORE should not be ignored here otherwise
+            // DynamicLoader/Thread test will randomly fail with less leaks being reported.
+            if (CRT_USE_TYPE(crtheader->use) == CRT_USE_FREE ||
+                CRT_USE_TYPE(crtheader->use) == CRT_USE_INTERNAL) {
+                // This block is marked as being used internally by the CRT.
+                // The CRT will free the block after VLD is destroyed.
+                continue;
+            }
+        }
+
+        // Dump the call stack.
+        if (info->callStack) {
+            nCount += info->callStack->resolve(g_vld.m_options & VLD_OPT_TRACE_INTERNAL_FRAMES);
+            if ((g_vld.m_options & VLD_OPT_SKIP_CRTSTARTUP_LEAKS) && info->callStack->isCrtStartupAlloc()) {
+                info->reported = true;
+                continue;
+            }
+        }
+    }
+    return nCount;
+}
+
+void BlockMap::MarkAllAsReported(DWORD threadId) {
+    for (BlockMap::Iterator blockit = begin(); blockit != end(); ++blockit) {
+        blockinfo_t* info = (*blockit).second;
+        if (threadId == ((DWORD)-1) || info->threadId == threadId) {
+            info->reported = true;
+        }
+    }
+}
+
+// reportleaks - Generates a memory leak report for the specified heap.
+//
+//  - heap (IN): Handle to the heap for which to generate a memory leak
+//      report.
+//
+//  Return Value:
+//
+//    None.
+//
+size_t HeapMap::ReportLeaks(HANDLE heap) {
+    CriticalSectionLocker cs(m_lock);
+
+    assert(heap != NULL);
+
+    // Find the heap's information (blockmap, etc).
+    HeapMap::Iterator heapit = find(heap);
+    if (heapit == end()) {
+        // Nothing is allocated from this heap. No leaks.
+        return 0;
+    }
+
+    Set<blockinfo_t*> aggregatedLeaks;
+    heapinfo_t* heapinfo = (*heapit).second;
+    // Generate a memory leak report for heap.
+    bool firstLeak = true;
+    size_t nCount = heapinfo->blockMap.ReportLeaks(firstLeak, aggregatedLeaks);
+
+    // Show a summary.
+    if (nCount != 0) {
+        Report(L"Visual Leak Detector detected %Iu memory leak%s in heap " ADDRESSFORMAT L"\n",
+            nCount, (nCount > 1) ? L"s" : L"", heap);
+    }
+    return nCount;
+}
+
+size_t HeapMap::ReportLeaks(DWORD threadId) {
+    CriticalSectionLocker cs(m_lock);
+
+    size_t nCount = 0;
+    bool firstLeak = true;
+    Set<blockinfo_t*> aggregatedLeaks;
+    for (HeapMap::Iterator heapit = begin(); heapit != end(); ++heapit) {
+        heapinfo_t* heapinfo = (*heapit).second;
+        nCount += heapinfo->blockMap.ReportLeaks(firstLeak, aggregatedLeaks, threadId);
+    }
+    return nCount;
+
+}
+
+size_t HeapMap::GetLeakCount(DWORD threadId) {
+    CriticalSectionLocker cs(m_lock);
+
+    size_t nCount = 0;
+
+    // Generate a memory leak report for each heap in the process.
+    for (HeapMap::Iterator heapit = begin(); heapit != end(); ++heapit) {
+        heapinfo_t* heapinfo = (*heapit).second;
+        nCount += heapinfo->blockMap.GetLeakCount(threadId);
+    }
+    return nCount;
+}
+
+void HeapMap::MarkAllAsReported(DWORD threadId) {
+    CriticalSectionLocker cs(m_lock);
+
+    for (HeapMap::Iterator heapit = begin(); heapit != end(); ++heapit) {
+        heapinfo_t* heapinfo = (*heapit).second;
+        heapinfo->blockMap.MarkAllAsReported(threadId);
+    }
+}
+
+
+size_t BlockMap::ReportLeaks(bool &firstLeak, Set<blockinfo_t*> &aggregatedLeaks, DWORD threadId) {
+    size_t leaksFound = 0;
+
+    for (BlockMap::Iterator blockit = begin(); blockit != end(); ++blockit) {
+        // Found a block which is still in the BlockMap. We've identified a
+        // potential memory leak.
+        LPCVOID block = (*blockit).first;
+        blockinfo_t* info = (*blockit).second;
+        if (info->reported)
+            continue;
+
+        if (threadId != ((DWORD)-1) && info->threadId != threadId)
+            continue;
+
+        Set<blockinfo_t*>::Iterator it = aggregatedLeaks.find(info);
+        if (it != aggregatedLeaks.end())
+            continue;
+
+        LPCVOID address = block;
+        SIZE_T size = info->size;
+
+        if (!info->debugCrtAlloc) {
+            crtdbgblockheader_t* crtheader = (crtdbgblockheader_t*)block;
+            SIZE_T nSize = sizeof(crtdbgblockheader_t) + crtheader->size + GAPSIZE;
+            int nValid = _CrtIsValidPointer(block, (unsigned int)info->size, TRUE);
+            if (_BLOCK_TYPE_IS_VALID(crtheader->use) && nValid && (nSize == info->size)) {
+                info->debugCrtAlloc = true;
+            }
+        }
+
+        if (info->debugCrtAlloc) {
+            // This block is allocated to a CRT heap, so the block has a CRT
+            // memory block header pretended to it.
+            crtdbgblockheader_t* crtheader = (crtdbgblockheader_t*)block;
+            // Leaks identified as CRT_USE_IGNORE should not be ignored here otherwise
+            // DynamicLoader/Thread test will randomly fail with less leaks being reported.
+            if (CRT_USE_TYPE(crtheader->use) == CRT_USE_FREE ||
+                CRT_USE_TYPE(crtheader->use) == CRT_USE_INTERNAL) {
+                // This block is marked as being used internally by the CRT.
+                // The CRT will free the block after VLD is destroyed.
+                continue;
+            }
+            // The CRT header is more or less transparent to the user, so
+            // the information about the contained block will probably be
+            // more useful to the user. Accordingly, that's the information
+            // we'll include in the report.
+            address = CRTDBGBLOCKDATA(block);
+            size = crtheader->size;
+        }
+
+        if (!info->debugCrtAlloc && (g_vld.m_options & VLD_OPT_SKIP_CRTSTARTUP_LEAKS)) {
+            // Check for crt startup allocations
+            if (info->callStack && info->callStack->isCrtStartupAlloc()) {
+                info->reported = true;
+                continue;
+            }
+        }
+
+        // It looks like a real memory leak.
+        if (firstLeak) { // A confusing way to only display this message once
+            Report(L"WARNING: Visual Leak Detector detected memory leaks!\n");
+            firstLeak = false;
+        }
+        SIZE_T blockLeaksCount = 1;
+        Report(L"---------- Block %Iu at " ADDRESSFORMAT L": %Iu bytes ----------\n", info->serialNumber, address, size);
+#ifdef _DEBUG
+        if (info->debugCrtAlloc) {
+            crtdbgblockheader_t* crtheader = (crtdbgblockheader_t*)block;
+            Report(L"  CRT Alloc ID: %Iu\n", crtheader->request);
+            assert(size == crtheader->size);
+        }
+#endif
+        assert(info->callStack);
+        if (g_vld.m_options & VLD_OPT_AGGREGATE_DUPLICATES) {
+            // Aggregate all other leaks which are duplicates of this one
+            // under this same heading, to cut down on clutter.
+            SIZE_T erased = g_vld.m_heapMap->EraseDuplicates(blockit, aggregatedLeaks);
+
+            // add only the number that were erased, since the 'one left over'
+            // is already recorded as a leak
+            blockLeaksCount += erased;
+        }
+
+        DWORD callstackCRC = 0;
+        if (info->callStack)
+            callstackCRC = CalculateCRC32(info->size, info->callStack->getHashValue());
+        Report(L"  Leak Hash: 0x%08X, Count: %Iu, Total %Iu bytes\n", callstackCRC, blockLeaksCount, size * blockLeaksCount);
+        leaksFound += blockLeaksCount;
+
+        // Dump the call stack.
+        if (blockLeaksCount == 1)
+            Report(L"  Call Stack (TID %u):\n", info->threadId);
+        else
+            Report(L"  Call Stack:\n");
+        if (info->callStack)
+            info->callStack->dump(g_vld.m_options & VLD_OPT_TRACE_INTERNAL_FRAMES);
+
+        // Dump the data in the user data section of the memory block.
+        if (g_vld.m_maxDataDump != 0) {
+            Report(L"  Data:\n");
+            if (g_vld.m_options & VLD_OPT_UNICODE_REPORT) {
+                DumpMemoryW(address, (g_vld.m_maxDataDump < size) ? g_vld.m_maxDataDump : size);
+            } else {
+                DumpMemoryA(address, (g_vld.m_maxDataDump < size) ? g_vld.m_maxDataDump : size);
+            }
+        }
+        Report(L"\n\n");
+    }
+
+    return leaksFound;
+}
+
+
+
+
+// mapheap - Tracks heap creation. Creates a block map for tracking individual
+//   allocations from the newly created heap and then maps the heap to this
+//   block map.
+//
+//  - heap (IN): Handle to the newly created heap.
+//
+//  Return Value:
+//
+//    None.
+//
+BOOL HeapMap::MapHeap(HANDLE heap) {
+    CriticalSectionLocker cs(m_lock);
+
+    // Create a new block map for this heap and insert it into the heap map.
+    heapinfo_t* heapinfo = new heapinfo_t;
+    heapinfo->flags = 0x0;
+
+    HeapMap::Iterator heapit = insert(heap, heapinfo);
+    if (heapit == end()) {
+        // Somehow this heap has been created twice without being destroyed,
+        // or at least it was destroyed without VLD's knowledge. Unmap the heap
+        // from the existing heapinfo, and remap it to the new one.
+        Report(L"WARNING: Visual Leak Detector detected a duplicate heap (" ADDRESSFORMAT L").\n", heap);
+        heapit = find(heap);
+        UnMapHeap((*heapit).first);
+        insert(heap, heapinfo);
+        return TRUE;
+    }
+    return TRUE;
+}
+
+heapinfo_t* HeapMap::FindHeap(HANDLE heap) {
+    CriticalSectionLocker cs(m_lock);
+    HeapMap::Iterator heapit = find(heap);
+    if (heapit != end()) {
+        return (*heapit).second;
+    }
+    return NULL;
+}
+
+
+BOOL HeapMap::UnMapHeap(HANDLE heap)
+{
+    CriticalSectionLocker cs(m_lock);
+
+    // Find this heap's block map.
+    HeapMap::Iterator heapit = find(heap);
+    if (heapit == end()) {
+        // This heap hasn't been mapped. We must not have monitored this heap's
+        // creation (probably happened before VLD was initialized).
+        return TRUE;
+    }
+
+    // Free all of the blockinfo_t structures stored in the block map.
+    heapinfo_t *heapinfo = (*heapit).second;
+    BlockMap   *blockmap = &heapinfo->blockMap;
+    blockmap->Clear(TRUE);
+    delete heapinfo;
+
+    // Remove this heap's block map from the heap map.
+    erase(heapit);
+    return TRUE;
+}
+
+size_t BlockMap::EraseDuplicates(const BlockMap::Iterator &element, Set<blockinfo_t*> &aggregatedLeaks) {
+    blockinfo_t *elementinfo = (*element).second;
+    SIZE_T       nCount = 0;
+
+    for (BlockMap::Iterator blockit = begin(); blockit != end(); ++blockit) {
+        if (blockit == element) {
+            // Don't delete the element of which we are searching for
+            // duplicates.
+            continue;
+        }
+        blockinfo_t *info = (*blockit).second;
+        if (info->callStack == NULL)
+            continue;
+        Set<blockinfo_t*>::Iterator it = aggregatedLeaks.find(info);
+        if (it != aggregatedLeaks.end())
+            continue;
+        if ((info->size == elementinfo->size) && (*(info->callStack) == *(elementinfo->callStack))) {
+            // Found a duplicate. Mark it.
+            aggregatedLeaks.insert(info);
+            ++nCount;
+        }
+    }
+    return nCount;
+
+}
+
+size_t HeapMap::EraseDuplicates(const BlockMap::Iterator &element, Set<blockinfo_t*> &aggregatedLeaks) {
+    CriticalSectionLocker cs(m_lock);
+
+    blockinfo_t *elementinfo = (*element).second;
+
+    if (elementinfo->callStack == NULL)
+        return 0;
+
+    size_t       nCount = 0;
+    // Iterate through all block maps, looking for blocks with the same size
+    // and callstack as the specified element.
+    for (HeapMap::Iterator heapit = begin(); heapit != end(); ++heapit) {
+        BlockMap *blockmap = &(*heapit).second->blockMap;
+        blockmap->EraseDuplicates(element, aggregatedLeaks);
+    }
+
+    return nCount;
+}
+
+HeapMap::HeapMap() {
+    m_lock.Initialize();
+    reserve(HEAP_MAP_RESERVE);
+}
+
+HeapMap::~HeapMap() {
+    Clear();
+    m_lock.Delete();
+}
+
+
+BlockMap::BlockMap() {
+    reserve(BLOCK_MAP_RESERVE);
+}
+
+BlockMap::~BlockMap() {
+    Clear(FALSE);
+}
+
+void HeapMap::Clear() {
+    CriticalSectionLocker cs(m_lock);
+
+    // Free internally allocated resources used by the heapmap and blockmap.
+    for (HeapMap::Iterator heapit = begin(); heapit != end(); ++heapit) {
+        delete (*heapit).second;
+    }
+}
+
+blockinfo_t* HeapMap::FindBlock(LPCVOID mem, __out HANDLE& heap) {
+    CriticalSectionLocker cs(m_lock);
+
+    heap = NULL;
+    // Iterate through all heaps
+    for (HeapMap::Iterator heapit = begin(); heapit != end(); ++heapit) {
+        heapinfo_t* heapinfo = (*heapit).second;
+        blockinfo_t* info = heapinfo->blockMap.FindBlock(mem);
+        if (info) {
+            // Found the block.
+            heap = heapinfo->heap;
+            return info;
+        }
+    }
+
+    return NULL;
+}
+
+blockinfo_t* BlockMap::FindBlock(LPCVOID mem) {
+    // Iterate through all memory blocks in each heap
+    BlockMap::Iterator blockit = find(mem);
+    if (blockit != end()) {
+        return (*blockit).second;
+    }
+    return NULL;
+}
+
+blockinfo_t* HeapMap::MapBlock(HANDLE heap, LPCVOID mem, SIZE_T size, bool debugcrtalloc, DWORD threadId) {
+    CriticalSectionLocker cs(m_lock);
+    // Insert the block's information into the block map.
+    HeapMap::Iterator heapit = find(heap);
+    if (heapit == end()) {
+        // We haven't mapped this heap to a block map yet. Do it now.
+        MapHeap(heap);
+        heapit = find(heap);
+        assert(heapit != end());
+    }
+    BlockMap* blockmap = &(*heapit).second->blockMap;
+    return blockmap->MapBlock(mem, size, debugcrtalloc, threadId);
+}
+
+blockinfo_t* BlockMap::MapBlock(LPCVOID mem, SIZE_T size, bool debugcrtalloc, DWORD threadId)
+{
+    // Record the block's information.
+    blockinfo_t* blockinfo = new blockinfo_t();
+    blockinfo->callStack = NULL;
+    blockinfo->threadId = threadId;
+    blockinfo->serialNumber = g_vld.m_requestCurr++;
+    blockinfo->size = size;
+    blockinfo->reported = false;
+    blockinfo->debugCrtAlloc = debugcrtalloc;
+
+    if (SIZE_MAX - g_vld.m_totalAlloc > size)
+        g_vld.m_totalAlloc += size;
+    else
+        g_vld.m_totalAlloc = SIZE_MAX;
+    g_vld.m_curAlloc += size;
+
+    if (g_vld.m_curAlloc > g_vld.m_maxAlloc)
+        g_vld.m_maxAlloc = g_vld.m_curAlloc;
+
+    BlockMap::Iterator blockit = insert(mem, blockinfo);
+    if (blockit == end()) {
+        // A block with this address has already been allocated. The
+        // previously allocated block must have been freed (probably by some
+        // mechanism unknown to VLD), or the heap wouldn't have allocated it
+        // again. Replace the previously allocated info with the new info.
+        blockit = find(mem);
+        blockinfo_t* info = (*blockit).second;
+        g_vld.m_curAlloc -= info->size;
+        Report(L"VLD: New allocation at already allocated address: 0x%p with size: %u and new size: %u\n", mem, info->size, size);
+        delete info;
+        erase(blockit);
+        insert(mem, blockinfo);
+    }
+    return blockinfo;
+}
+
+blockinfo_t* HeapMap::ReMapBlock(HANDLE heap, LPCVOID mem, LPCVOID newmem, SIZE_T size, bool debugcrtalloc, DWORD threadId, const context_t &context) {
+
+    CriticalSectionLocker cs(m_lock);
+
+    if (newmem != mem) {
+        // The block was not reallocated in-place. Instead the old block was
+        // freed and a new block allocated to satisfy the new size.
+        UnMapBlock(heap, mem, context);
+        return MapBlock(heap, newmem, size, debugcrtalloc, threadId);
+    }
+
+    // The block was reallocated in-place. Find the existing blockinfo_t
+    // entry in the block map and update it with the new callstack and size.
+    HeapMap::Iterator heapit = find(heap);
+    if (heapit == end()) {
+        // We haven't mapped this heap to a block map yet. Obviously the
+        // block has also not been mapped to a blockinfo_t entry yet either,
+        // so treat this reallocation as a brand-new allocation (this will
+        // also map the heap to a new block map).
+        return MapBlock(heap, newmem, size, debugcrtalloc, threadId);
+    }
+
+    // Find the block's blockinfo_t structure so that we can update it.
+    BlockMap           *blockmap = &(*heapit).second->blockMap;
+    BlockMap::Iterator  blockit = blockmap->find(mem);
+    if (blockit == blockmap->end()) {
+        // The block hasn't been mapped to a blockinfo_t entry yet.
+        // Treat this reallocation as a new allocation.
+        return MapBlock(heap, newmem, size, debugcrtalloc, threadId);
+    }
+
+    // Found the blockinfo_t entry for this block. Update it with
+    // a new callstack and new size.
+    blockinfo_t* info = (*blockit).second;
+    if (info->callStack) {
+        info->callStack.reset();
+    }
+
+    if (g_vld.m_totalAlloc < SIZE_MAX) {
+        g_vld.m_totalAlloc -= info->size;
+        if (SIZE_MAX - g_vld.m_totalAlloc > size)
+            g_vld.m_totalAlloc += size;
+        else
+            g_vld.m_totalAlloc = SIZE_MAX;
+    }
+
+    g_vld.m_curAlloc -= info->size;
+    g_vld.m_curAlloc += size;
+
+    if (g_vld.m_curAlloc > g_vld.m_maxAlloc)
+        g_vld.m_maxAlloc = g_vld.m_curAlloc;
+
+    info->threadId = threadId;
+    // Update the block's size.
+    info->size = size;
+    return info;
+}
+
+#if 0
+blockinfo_t* HeapMap::ReMapBlock(HANDLE heap, LPCVOID mem, LPCVOID newmem, SIZE_T size, bool debugcrtalloc, DWORD threadId, const context_t &context) {
+    CriticalSectionLocker cs(m_lock);
+    // Insert the block's information into the block map.
+
+    HANDLE other_heap = NULL;
+    blockinfo_t* blockinfo = FindBlock(mem, other_heap);
+    if (blockinfo) {
+        if (heap == other_heap) {
+
+        }
+    } else {
+
+    }
+    HeapMap::Iterator heapit = find(heap);
+    if (heapit == end()) {
+        // We haven't mapped this heap to a block map yet. Do it now.
+        MapHeap(heap);
+        heapit = find(heap);
+        assert(heapit != end());
+    }
+    BlockMap* blockmap = &(*heapit).second->blockMap;
+    return blockmap->ReMapBlock(mem, newmem, size, debugcrtalloc, threadId, context);
+}
+blockinfo_t* BlockMap::ReMapBlock(LPCVOID mem, LPCVOID newmem, SIZE_T size, bool debugcrtalloc, DWORD threadId, const context_t &context) {
+    blockinfo_t* pblockInfo = NULL;
+
+    if (newmem != mem) {
+        // The block was not reallocated in-place. Instead the old block was
+        // freed and a new block allocated to satisfy the new size.
+        g_vld.m_heapMap.UnMapBlock(heap, mem, context);
+        return MapBlock(newmem, size, debugcrtalloc, threadId);
+    }
+
+    // The block was reallocated in-place. Find the existing blockinfo_t
+    // entry in the block map and update it with the new callstack and size.
+    HeapMap::Iterator heapit = m_heapMap.find(heap);
+    if (heapit == m_heapMap.end()) {
+        // We haven't mapped this heap to a block map yet. Obviously the
+        // block has also not been mapped to a blockinfo_t entry yet either,
+        // so treat this reallocation as a brand-new allocation (this will
+        // also map the heap to a new block map).
+        BlockMap* blockmap = &(*heapit).second->blockMap;
+        return blockmap->MapBlock(newmem, size, debugcrtalloc, threadId);
+    }
+
+    // Find the block's blockinfo_t structure so that we can update it.
+    BlockMap           *blockmap = &(*heapit).second->blockMap;
+    BlockMap::Iterator  blockit = blockmap->find(mem);
+    if (blockit == blockmap->end()) {
+        // The block hasn't been mapped to a blockinfo_t entry yet.
+        // Treat this reallocation as a new allocation.
+        return MapBlock(newmem, size, debugcrtalloc, threadId);
+    }
+
+    // Found the blockinfo_t entry for this block. Update it with
+    // a new callstack and new size.
+    blockinfo_t* info = (*blockit).second;
+    if (info->callStack) {
+        info->callStack.reset();
+    }
+
+    if (g_vld.m_totalAlloc < SIZE_MAX) {
+        g_vld.m_totalAlloc -= info->size;
+        if (SIZE_MAX - g_vld.m_totalAlloc > size)
+            g_vld.m_totalAlloc += size;
+        else
+            g_vld.m_totalAlloc = SIZE_MAX;
+    }
+
+    g_vld.m_curAlloc -= info->size;
+    g_vld.m_curAlloc += size;
+
+    if (g_vld.m_curAlloc > g_vld.m_maxAlloc)
+        g_vld.m_maxAlloc = g_vld.m_curAlloc;
+
+    info->threadId = threadId;
+    // Update the block's size.
+    info->size = size;
+    return pblockInfo;
+}
+#endif
+
+
+
+void HeapMap::UnMapBlock(HANDLE heap, LPCVOID mem, const context_t &context) {
+    if (NULL == mem)
+        return;
+
+    // Find this heap's block map.
+    CriticalSectionLocker cs(m_lock);
+    HeapMap::Iterator heapit = find(heap);
+    if (heapit == end()) {
+        // We don't have a block map for this heap. We must not have monitored
+        // this allocation (probably happened before VLD was initialized).
+        return;
+    }
+    // Find this block in the block map.
+    BlockMap* blockmap = &(*heapit).second->blockMap;
+    return blockmap->UnMapBlock(heap, mem, context);
+}
+
+void BlockMap::UnMapBlock(HANDLE heap, LPCVOID mem, const context_t &context)
+{
+    BlockMap::Iterator  blockit = find(mem);
+    if (blockit == end()) {
+        // This memory block is not in the block map. We must not have monitored this
+        // allocation (probably happened before VLD was initialized).
+
+        // This can also result from allocating on one heap, and freeing on another heap.
+        // This is an especially bad way to corrupt the application.
+        // Now we have to search through every heap and every single block in each to make
+        // sure that this is indeed the case.
+        if (g_vld.m_options & VLD_OPT_VALIDATE_HEAPFREE) {
+            HANDLE other_heap = NULL;
+            blockinfo_t* alloc_block = g_vld.m_heapMap->FindBlock(mem, other_heap); // other_heap is an out parameter
+            bool diff = other_heap != heap; // Check indeed if the other heap is different
+            if (alloc_block && alloc_block->callStack && diff) {
+                Report(L"CRITICAL ERROR!: VLD reports that memory was allocated in one heap and freed in another.\nThis will result in a corrupted heap.\nAllocation Call stack.\n");
+                Report(L"---------- Block %Iu at " ADDRESSFORMAT L": %Iu bytes ----------\n", alloc_block->serialNumber, mem, alloc_block->size);
+                Report(L"  TID: %u\n", alloc_block->threadId);
+                Report(L"  Call Stack:\n");
+                alloc_block->callStack->dump(g_vld.m_options & VLD_OPT_TRACE_INTERNAL_FRAMES);
+
+                // Now we need a way to print the current callstack at this point:
+                CallStack* stack_here = CallStack::Create();
+                stack_here->getStackTrace(g_vld.m_maxTraceFrames, context);
+                Report(L"Deallocation Call stack.\n");
+                Report(L"---------- Block %Iu at " ADDRESSFORMAT L": %Iu bytes ----------\n", alloc_block->serialNumber, mem, alloc_block->size);
+                Report(L"  Call Stack:\n");
+                stack_here->dump(FALSE);
+                // Now it should be safe to delete our temporary callstack
+                delete stack_here;
+                stack_here = NULL;
+                if (IsDebuggerPresent())
+                    DebugBreak();
+            }
+        }
+        return;
+    }
+
+    // Free the blockinfo_t structure and erase it from the block map.
+    blockinfo_t *info = (*blockit).second;
+    g_vld.m_curAlloc -= info->size;
+    delete info;
+    erase(blockit);
+}
+
+
+
+TlsMap::TlsMap() {
+    m_lock.Initialize();
+    m_tlsIndex = TlsAlloc();
+
+    // This is highly unlikely to happen, but just in case, check to be sure
+    // we got a valid TLS index.
+    if (m_tlsIndex == TLS_OUT_OF_INDEXES) {
+        Report(L"ERROR: Visual Leak Detector could not be installed because thread local"
+            L"  storage could not be allocated.");
+    }
+}
+
+TlsMap::~TlsMap() {
+    Clear();
+
+    if (m_tlsIndex != TLS_OUT_OF_INDEXES) {
+        TlsFree(m_tlsIndex);
+    }
+    m_lock.Delete();
+}
+
+void TlsMap::Clear() {
+    CriticalSectionLocker cs(m_lock);
+
+    for (TlsMap::Iterator tlsit = begin(); tlsit != end(); ++tlsit) {
+        delete (*tlsit).second;
+    }
+}
+
+tls_t* TlsMap::Get() {
+
+    // Get the pointer to this thread's thread local storage structure.
+    tls_t* tls = (tls_t*)TlsGetValue(m_tlsIndex);
+    assert(GetLastError() == ERROR_SUCCESS);
+
+    if (tls == NULL) {
+        DWORD threadId = GetCurrentThreadId();
+
+        CriticalSectionLocker cs(m_lock);
+        TlsMap::Iterator it = find(threadId);
+        if (it == end()) {
+            // This thread's thread local storage structure has not been allocated.
+            tls = new tls_t;
+
+            // Add this thread's TLS to the TlsSet.
+            insert(threadId, tls);
+        } else {
+            // Already had a thread with this ID
+            tls = (*it).second;
+        }
+
+        ZeroMemory(&tls->context, sizeof(tls->context));
+        tls->flags = 0x0;
+        tls->oldFlags = 0x0;
+        tls->threadId = threadId;
+        tls->blockWithoutGuard = NULL;
+        TlsSetValue(m_tlsIndex, tls);
+    }
+
+    return tls;
+}
+
+BOOL TlsMap::Wait() {
+    CriticalSectionLocker cs(m_lock);
+
+    bool threadsactive = false;
+    DWORD dwCurProcessID = GetCurrentProcessId();
+    int waitcount = 0;
+
+    // See if any threads that have ever entered VLD's code are still active.
+    for (TlsMap::Iterator tlsit = begin(); tlsit != end(); ++tlsit) {
+        if ((*tlsit).second->threadId == GetCurrentThreadId()) {
+            // Don't wait for the current thread to exit.
+            continue;
+        }
+
+        HANDLE thread = OpenThread(SYNCHRONIZE | THREAD_QUERY_INFORMATION, FALSE, (*tlsit).second->threadId);
+        if (thread == NULL) {
+            // Couldn't query this thread. We'll assume that it exited.
+            continue; // XXX should we check GetLastError()?
+        }
+        if (GetProcessIdOfThread(thread) != dwCurProcessID) {
+            //The thread ID has been recycled.
+            CloseHandle(thread);
+            continue;
+        }
+        if (WaitForSingleObject(thread, 10000) == WAIT_TIMEOUT) { // 10 seconds
+            // There is still at least one other thread running. The CRT
+            // will stomp it dead when it cleans up, which is not a
+            // graceful way for a thread to go down. Warn about this,
+            // and wait until the thread has exited so that we know it
+            // can't still be off running somewhere in VLD's code.
+            //
+            // Since we've been waiting a while, let the human know we are
+            // still here and alive.
+            waitcount++;
+            threadsactive = true;
+            if (waitcount >= 9) // 90 sec.
+            {
+                CloseHandle(thread);
+                return threadsactive;
+            }
+            Report(L"Visual Leak Detector: Waiting for threads to terminate...\n");
+        }
+        CloseHandle(thread);
+    }
+    return threadsactive;
+}
+
+void TlsMap::EnableAll(BOOL bEnable) {
+    CriticalSectionLocker cs(m_lock);
+
+    for (TlsMap::Iterator tlsit = begin(); tlsit != end(); ++tlsit) {
+        (*tlsit).second->oldFlags = (*tlsit).second->flags;
+        if (bEnable) {
+            (*tlsit).second->flags &= ~VLD_TLS_DISABLED;
+            (*tlsit).second->flags |= VLD_TLS_ENABLED;
+        } else {
+            (*tlsit).second->flags &= ~VLD_TLS_ENABLED;
+            (*tlsit).second->flags |= VLD_TLS_DISABLED;
+        }
+    }
+}
+
+void TlsMap::Enable(BOOL bEnable) {
+    CriticalSectionLocker cs(m_lock);
+
+    // Enable memory leak detection for the current thread.
+    tls_t *tls = Get();
+    if (bEnable == -1) {
+        tls->flags &= ~(VLD_TLS_DISABLED | VLD_TLS_ENABLED);
+        tls->flags |= tls->oldFlags & (VLD_TLS_DISABLED | VLD_TLS_ENABLED);
+    } else if (bEnable) {
+        tls->oldFlags = tls->flags;
+        tls->flags &= ~VLD_TLS_DISABLED;
+        tls->flags |= VLD_TLS_ENABLED;
+    } else {
+        tls->oldFlags = tls->flags;
+        tls->flags &= ~VLD_TLS_ENABLED;
+        tls->flags |= VLD_TLS_DISABLED;
+    }
 }

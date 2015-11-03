@@ -113,18 +113,73 @@ struct blockinfo_t {
 };
 
 // BlockMaps map memory blocks (via their addresses) to blockinfo_t structures.
-typedef Map<LPCVOID, blockinfo_t*> BlockMap;
+class BlockMap : private Map<LPCVOID, blockinfo_t*> {
+    friend class HeapMap;
+public:
+    BlockMap();
+    ~BlockMap();
+private:
+    // Disallow certain operations
+    BlockMap(const BlockMap&);
+    BlockMap& operator=(const BlockMap&);
+public:
+    void Clear(BOOL bUpdate);
+    void Unmap();
+
+    blockinfo_t* MapBlock(LPCVOID mem, SIZE_T size, bool debugcrtalloc, DWORD threadId);
+    blockinfo_t* ReMapBlock(LPCVOID mem, LPCVOID newmem, SIZE_T size, bool debugcrtalloc, DWORD threadId, const context_t &context);
+    void UnMapBlock(HANDLE heap, LPCVOID mem, const context_t &context);
+
+    size_t GetLeakCount(DWORD threadId = (DWORD)-1);
+    size_t ReportLeaks(bool &firstLeak, Set<blockinfo_t*> &aggregatedLeaks, DWORD threadId = (DWORD)-1);
+    void MarkAllAsReported(DWORD threadId = (DWORD)-1);
+    size_t Resolve();
+private:
+    size_t EraseDuplicates(const BlockMap::Iterator &element, Set<blockinfo_t*> &aggregatedLeaks);
+    blockinfo_t* FindBlock(LPCVOID mem);
+};
 
 // Information about each heap in the process is kept in this map. Primarily
 // this is used for mapping heaps to all of the blocks allocated from those
 // heaps.
 struct heapinfo_t {
+    HANDLE   heap;
     BlockMap blockMap;   // Map of all blocks allocated from this heap.
     UINT32   flags;      // Heap status flags
 };
 
 // HeapMaps map heaps (via their handles) to BlockMaps.
-typedef Map<HANDLE, heapinfo_t*> HeapMap;
+class HeapMap : private Map<HANDLE, heapinfo_t*> {
+    friend class BlockMap;
+public:
+    HeapMap();
+    ~HeapMap();
+private:
+    // Disallow certain operations
+    HeapMap(const HeapMap&);
+    HeapMap& operator=(const HeapMap&);
+public:
+    BOOL MapHeap(HANDLE heap);
+    BOOL UnMapHeap(HANDLE heap);
+    size_t ReportLeaks(HANDLE heap);
+    heapinfo_t* FindHeap(HANDLE heap);
+    void Clear();
+
+    blockinfo_t* MapBlock(HANDLE heap, LPCVOID mem, SIZE_T size, bool debugcrtalloc, DWORD threadId);
+    blockinfo_t* ReMapBlock(HANDLE heap, LPCVOID mem, LPCVOID newmem, SIZE_T size, bool debugcrtalloc, DWORD threadId, const context_t &context);
+    void UnMapBlock(HANDLE heap, LPCVOID mem, const context_t &context);
+
+    size_t GetLeakCount(DWORD threadId = (DWORD)-1);
+    size_t ReportLeaks(DWORD threadId = (DWORD)-1);
+    void MarkAllAsReported(DWORD threadId = (DWORD)-1);
+    size_t Resolve();
+private:
+    size_t EraseDuplicates(const BlockMap::Iterator &element, Set<blockinfo_t*> &aggregatedLeaks);
+    blockinfo_t* FindBlock(LPCVOID mem, __out HANDLE& heap);
+private:
+    CriticalSection m_lock;
+}; 
+
 typedef std::basic_string<wchar_t, std::char_traits<wchar_t>, vldallocator<wchar_t> > vldstring;
 
 // This structure stores information, primarily the virtual address range, about
@@ -180,7 +235,25 @@ struct tls_t {
 
 // The TlsSet allows VLD to keep track of all thread local storage structures
 // allocated in the process.
-typedef Map<DWORD,tls_t*> TlsMap;
+class TlsMap : private Map<DWORD, tls_t*> {
+public:
+    TlsMap();
+    ~TlsMap();
+private:
+    // Disallow certain operations
+    TlsMap(const TlsMap&);
+    TlsMap& operator=(const TlsMap&);
+public:
+    BOOL Wait();
+    void Clear();
+    tls_t* Get();
+    void Enable(BOOL bEnable);
+    void EnableAll(BOOL bEnable);
+    CriticalSection& Lock();
+private:
+    CriticalSection m_lock;
+    DWORD           m_tlsIndex;          // Thread-local storage index.
+};
 
 class CaptureContext {
 public:
@@ -228,6 +301,8 @@ class CallStack;
 //
 class VisualLeakDetector : public IMalloc
 {
+    friend class HeapMap;
+    friend class BlockMap;
     friend class CaptureContext;
 public:
     VisualLeakDetector();
@@ -309,7 +384,7 @@ public:
     int  SetReportHook(int mode, VLD_REPORT_HOOK pfnNewHook);
     VOID SetModulesList(CONST WCHAR *modules, BOOL includeModules);
     bool GetModulesList(WCHAR *modules, UINT size);
-    int ResolveCallstacks();
+    SIZE_T ResolveCallstacks();
 
     static NTSTATUS __stdcall _LdrLoadDll (LPWSTR searchpath, PULONG flags, unicodestring_t *modulename,
         PHANDLE modulehandle);
@@ -334,20 +409,8 @@ private:
     BOOL GetIniFilePath(LPTSTR lpPath, SIZE_T cchPath);
     VOID   configure ();
     BOOL   enabled ();
-    SIZE_T eraseDuplicates (const BlockMap::Iterator &element, Set<blockinfo_t*> &aggregatedLeak);
     tls_t* getTls ();
-    VOID   mapBlock (HANDLE heap, LPCVOID mem, SIZE_T size, bool crtalloc, DWORD threadId, blockinfo_t* &pblockInfo);
-    VOID   mapHeap (HANDLE heap);
-    VOID   remapBlock (HANDLE heap, LPCVOID mem, LPCVOID newmem, SIZE_T size,
-        bool crtalloc, DWORD threadId, blockinfo_t* &pblockInfo, const context_t &context);
     VOID   reportConfig ();
-    SIZE_T reportHeapLeaks (HANDLE heap);
-    SIZE_T getLeaksCount (heapinfo_t* heapinfo, DWORD threadId = (DWORD)-1);
-    SIZE_T reportLeaks(heapinfo_t* heapinfo, bool &firstLeak, Set<blockinfo_t*> &aggregatedLeaks, DWORD threadId = (DWORD)-1);
-    VOID   markAllLeaksAsReported (heapinfo_t* heapinfo, DWORD threadId = (DWORD)-1);
-    VOID   unmapBlock (HANDLE heap, LPCVOID mem, const context_t &context);
-    VOID   unmapHeap (HANDLE heap);
-    int    resolveStacks(heapinfo_t* heapinfo);
 
     // Static functions (callbacks)
     static BOOL __stdcall addLoadedModule (PCWSTR modulepath, DWORD64 modulebase, ULONG modulesize, PVOID context);
@@ -355,7 +418,6 @@ private:
 
     // Utils
     static bool isModuleExcluded (UINT_PTR returnaddress);
-    blockinfo_t* findAllocedBlock(LPCVOID, __out HANDLE& heap);
     static void getCallStack( CallStack *&pcallstack, context_t &context );
     void setupReporting();
     void checkInternalMemoryLeaks();
@@ -421,8 +483,6 @@ private:
 #define VLD_STATUS_INSTALLED            0x2   //   If set, VLD was successfully installed.
 #define VLD_STATUS_NEVER_ENABLED        0x4   //   If set, VLD started disabled, and has not yet been manually enabled.
 #define VLD_STATUS_FORCE_REPORT_TO_FILE 0x8   //   If set, the leak report is being forced to a file.
-    DWORD                m_tlsIndex;          // Thread-local storage index.
-    CriticalSection      m_tlsLock;           // Protects accesses to the Set of TLS structures.
     TlsMap              *m_tlsMap;            // Set of all thread-local storage structures for the process.
     HMODULE              m_vldBase;           // Visual Leak Detector's own module handle (base address).
     HMODULE              m_dbghelp;
