@@ -4,6 +4,7 @@
 #include "stdafx.h"
 #include <windows.h>
 #include <malloc.h>
+#include <iostream>
 
 #define VLD_FORCE_ENABLE
 #include <vld.h>
@@ -43,6 +44,10 @@ int Test()
     memset(m,   '5', 50);
     memset(n,   '6', 60);
 
+    // std libary in VS2015 dynamically initializes the objects "cout" and "cerr", which
+    // produce false positive leaks.
+    std::cout << "Test: cout";
+    std::cerr << "Test: cerr";
 
     // At this point VLDGetLeaksCount() and VLDReportLeaks() should report 9 leaks
     // including a leak for ml which has not been freed yet. ml will be freed after
