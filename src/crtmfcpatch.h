@@ -199,7 +199,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__calloc_dbg (size_t      num,
     assert(pcrtxxd__calloc_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd__calloc_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd__calloc_dbg, size, context_, debug, (CRTVersion >= 140));
 
     return pcrtxxd__calloc_dbg(num, size, type, file, line);
 }
@@ -231,7 +231,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__malloc_dbg (size_t      size,
     assert(pcrtxxd__malloc_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd__malloc_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd__malloc_dbg, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd__malloc_dbg(size, type, file, line);
 }
 
@@ -265,7 +265,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__realloc_dbg (void       *mem,
     assert(pcrtxxd__realloc_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd__realloc_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd__realloc_dbg, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd__realloc_dbg(mem, size, type, file, line);
 }
 
@@ -300,7 +300,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__recalloc_dbg (void       *mem,
     assert(pcrtxxd__recalloc_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd__recalloc_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd__recalloc_dbg, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd__recalloc_dbg(mem, num, size, type, file, line);
 }
 
@@ -316,7 +316,7 @@ char* CrtPatch<CRTVersion, debug>::crtd__strdup_dbg (const char* src,
     assert(pcrtxxd__strdup_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd__strdup_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd__strdup_dbg, strlen(src), context_, debug, (CRTVersion >= 140));
     return pcrtxxd__strdup_dbg(src, type, file, line);
 }
 
@@ -332,7 +332,7 @@ wchar_t* CrtPatch<CRTVersion, debug>::crtd__wcsdup_dbg (const wchar_t* src,
     assert(pcrtxxd__wcsdup_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd__wcsdup_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd__wcsdup_dbg, wcslen(src), context_, debug, (CRTVersion >= 140));
     return pcrtxxd__wcsdup_dbg(src, type, file, line);
 }
 
@@ -363,7 +363,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__scalar_new_dbg (size_t      size,
     assert(pcrtxxd_new_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd_new_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd_new_dbg, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd_new_dbg(size, type, file, line);
 }
 
@@ -394,7 +394,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__vector_new_dbg (size_t      size,
     assert(pcrtxxd_new_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd_new_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd_new_dbg, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd_new_dbg(size, type, file, line);
 }
 
@@ -419,7 +419,7 @@ void* CrtPatch<CRTVersion, debug>::crtd_calloc (size_t num, size_t size)
     assert(pcrtxxd_calloc);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd_calloc, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd_calloc, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd_calloc(num, size);
 }
 
@@ -442,7 +442,7 @@ void* CrtPatch<CRTVersion, debug>::crtd_malloc (size_t size)
     assert(pcrtxxd_malloc);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd_malloc, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd_malloc, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd_malloc(size);
 }
 
@@ -467,7 +467,7 @@ void* CrtPatch<CRTVersion, debug>::crtd_realloc (void *mem, size_t size)
     assert(pcrtxxd_realloc);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd_realloc, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd_realloc, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd_realloc(mem, size);
 }
 
@@ -492,7 +492,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__recalloc (void *mem, size_t num, size_t
     assert(pcrtxxd_recalloc);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd_recalloc, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd_recalloc, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd_recalloc(mem, num, size);
 }
 
@@ -505,7 +505,7 @@ char* CrtPatch<CRTVersion, debug>::crtd__strdup (const char* src)
     assert(pcrtxxd_strdup);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd_strdup, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd_strdup, strlen(src), context_, debug, (CRTVersion >= 140));
     return pcrtxxd_strdup(src);
 }
 
@@ -517,7 +517,7 @@ wchar_t* CrtPatch<CRTVersion, debug>::crtd__wcsdup (const wchar_t* src)
     assert(pcrtxxd_wcsdup);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd_wcsdup, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd_wcsdup, wcslen(src), context_, debug, (CRTVersion >= 140));
     return pcrtxxd_wcsdup(src);
 }
 
@@ -549,7 +549,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__aligned_malloc_dbg (size_t      size,
     assert(pcrtxxd__aligned_malloc_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd__aligned_malloc_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd__aligned_malloc_dbg, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd__aligned_malloc_dbg(size, alignment, type, file, line);
 }
 
@@ -582,7 +582,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__aligned_offset_malloc_dbg (size_t      
     assert(pcrtxxd__malloc_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd__malloc_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd__malloc_dbg, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd__malloc_dbg(size, alignment, offset, type, file, line);
 }
 
@@ -617,7 +617,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__aligned_realloc_dbg (void       *mem,
     assert(pcrtxxd__realloc_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd__realloc_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd__realloc_dbg, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd__realloc_dbg(mem, size, alignment, type, file, line);
 }
 
@@ -653,7 +653,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__aligned_offset_realloc_dbg (void       
     assert(pcrtxxd__realloc_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd__realloc_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd__realloc_dbg, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd__realloc_dbg(mem, size, alignment, offset, type, file, line);
 }
 
@@ -691,7 +691,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__aligned_recalloc_dbg (void       *mem,
     assert(pcrtxxd__recalloc_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd__recalloc_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd__recalloc_dbg, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd__recalloc_dbg(mem, num, size, alignment, type, file, line);
 }
 
@@ -730,7 +730,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__aligned_offset_recalloc_dbg (void      
     assert(pcrtxxd__recalloc_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd__recalloc_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd__recalloc_dbg, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd__recalloc_dbg(mem, num, size, alignment, offset, type, file, line);
 }
 
@@ -753,7 +753,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__aligned_malloc (size_t size, size_t ali
     assert(pcrtxxd_malloc);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd_malloc, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd_malloc, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd_malloc(size, alignment);
 }
 
@@ -776,7 +776,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__aligned_offset_malloc (size_t size, siz
     assert(pcrtxxd_malloc);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd_malloc, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd_malloc, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd_malloc(size, alignment, offset);
 }
 
@@ -801,7 +801,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__aligned_realloc (void *mem, size_t size
     assert(pcrtxxd_realloc);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd_realloc, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd_realloc, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd_realloc(mem, size, alignment);
 }
 
@@ -826,7 +826,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__aligned_offset_realloc (void *mem, size
     assert(pcrtxxd_realloc);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd_realloc, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd_realloc, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd_realloc(mem, size, alignment, offset);
 }
 
@@ -853,7 +853,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__aligned_recalloc (void *mem, size_t num
     assert(pcrtxxd_recalloc);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd_recalloc, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd_recalloc, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd_recalloc(mem, num, size, alignment);
 }
 
@@ -880,7 +880,7 @@ void* CrtPatch<CRTVersion, debug>::crtd__aligned_offset_recalloc (void *mem, siz
     assert(pcrtxxd_recalloc);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd_recalloc, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd_recalloc, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd_recalloc(mem, num, size, alignment, offset);
 }
 
@@ -901,7 +901,7 @@ void* CrtPatch<CRTVersion, debug>::crtd_scalar_new (size_t size)
     assert(pcrtxxd_scalar_new);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd_scalar_new, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd_scalar_new, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd_scalar_new(size);
 }
 
@@ -922,7 +922,7 @@ void* CrtPatch<CRTVersion, debug>::crtd_vector_new (size_t size)
     assert(pcrtxxd_vector_new);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pcrtxxd_vector_new, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pcrtxxd_vector_new, size, context_, debug, (CRTVersion >= 140));
     return pcrtxxd_vector_new(size);
 }
 
@@ -959,7 +959,7 @@ void* MfcPatch<CRTVersion, debug>::mfcd__scalar_new_dbg_4p (size_t       size,
     assert(pmfcxxd__new_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pmfcxxd__new_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pmfcxxd__new_dbg, size, context_, debug, (CRTVersion >= 140));
     return pmfcxxd__new_dbg(size, type, file, line);
 }
 
@@ -987,7 +987,7 @@ void* MfcPatch<CRTVersion, debug>::mfcd__scalar_new_dbg_3p (size_t       size,
     assert(pmfcxxd__new_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pmfcxxd__new_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pmfcxxd__new_dbg, size, context_, debug, (CRTVersion >= 140));
     return pmfcxxd__new_dbg(size, file, line);
 }
 
@@ -1018,7 +1018,7 @@ void* MfcPatch<CRTVersion, debug>::mfcd__vector_new_dbg_4p (size_t       size,
     assert(pmfcxxd__new_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pmfcxxd__new_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pmfcxxd__new_dbg, size, context_, debug, (CRTVersion >= 140));
     return pmfcxxd__new_dbg(size, type, file, line);
 }
 
@@ -1046,7 +1046,7 @@ void* MfcPatch<CRTVersion, debug>::mfcd__vector_new_dbg_3p (size_t       size,
     assert(pmfcxxd__new_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pmfcxxd__new_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pmfcxxd__new_dbg, size, context_, debug, (CRTVersion >= 140));
     return pmfcxxd__new_dbg(size, file, line);
 }
 
@@ -1067,7 +1067,7 @@ void* MfcPatch<CRTVersion, debug>::mfcd_scalar_new (size_t size)
     assert(pmfcxxd_new);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pmfcxxd_new, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pmfcxxd_new, size, context_, debug, (CRTVersion >= 140));
     return pmfcxxd_new(size);
 }
 
@@ -1088,7 +1088,7 @@ void* MfcPatch<CRTVersion, debug>::mfcd_vector_new (size_t size)
     assert(pmfcxxd_new);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pmfcxxd_new, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pmfcxxd_new, size, context_, debug, (CRTVersion >= 140));
     return pmfcxxd_new(size);
 }
 
@@ -1119,7 +1119,7 @@ void* MfcPatch<CRTVersion, debug>::mfcud__scalar_new_dbg_4p (size_t      size,
     assert(pmfcxxd__new_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pmfcxxd__new_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pmfcxxd__new_dbg, size, context_, debug, (CRTVersion >= 140));
     return pmfcxxd__new_dbg(size, type, file, line);
 }
 
@@ -1147,7 +1147,7 @@ void* MfcPatch<CRTVersion, debug>::mfcud__scalar_new_dbg_3p (size_t      size,
     assert(pmfcxxd__new_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pmfcxxd__new_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pmfcxxd__new_dbg, size, context_, debug, (CRTVersion >= 140));
     return pmfcxxd__new_dbg(size, file, line);
 }
 
@@ -1178,7 +1178,7 @@ void* MfcPatch<CRTVersion, debug>::mfcud__vector_new_dbg_4p (size_t      size,
     assert(pmfcxxd__new_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pmfcxxd__new_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pmfcxxd__new_dbg, size, context_, debug, (CRTVersion >= 140));
 
     return pmfcxxd__new_dbg(size, type, file, line);
 }
@@ -1207,7 +1207,7 @@ void* MfcPatch<CRTVersion, debug>::mfcud__vector_new_dbg_3p (size_t      size,
     assert(pmfcxxd__new_dbg);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pmfcxxd__new_dbg, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pmfcxxd__new_dbg, size, context_, debug, (CRTVersion >= 140));
     return pmfcxxd__new_dbg(size, file, line);
 }
 
@@ -1228,7 +1228,7 @@ void* MfcPatch<CRTVersion, debug>::mfcud_scalar_new (size_t size)
     assert(pmfcxxd_new);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pmfcxxd_new, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pmfcxxd_new, size, context_, debug, (CRTVersion >= 140));
     return pmfcxxd_new(size);
 }
 
@@ -1249,7 +1249,7 @@ void* MfcPatch<CRTVersion, debug>::mfcud_vector_new (size_t size)
     assert(pmfcxxd_new);
 
     CAPTURE_CONTEXT();
-    CaptureContext cc((void*)pmfcxxd_new, context_, debug, (CRTVersion >= 140));
+    CaptureContext cc((void*)pmfcxxd_new, size, context_, debug, (CRTVersion >= 140));
     return pmfcxxd_new(size);
 }
 

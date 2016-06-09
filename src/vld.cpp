@@ -2883,7 +2883,7 @@ int VisualLeakDetector::ResolveCallstacks()
     return unresolvedFunctionsCount;
 }
 
-CaptureContext::CaptureContext(void* func, context_t& context, BOOL debug, BOOL ucrt) : m_context(context) {
+CaptureContext::CaptureContext(void* func, size_t nSize, context_t& context, BOOL debug, BOOL ucrt) : m_context(context) {
     context.func = reinterpret_cast<UINT_PTR>(func);
     m_tls = g_vld.getTls();
 
@@ -2900,6 +2900,7 @@ CaptureContext::CaptureContext(void* func, context_t& context, BOOL debug, BOOL 
         // This is the first call to enter VLD for the current allocation.
         // Record the current frame pointer.
         m_tls->context = m_context;
+        m_nSize = nSize;
     }
 }
 
@@ -2908,6 +2909,12 @@ CaptureContext::~CaptureContext() {
         return;
 
     if ((m_tls->blockWithoutGuard) && (!IsExcludedModule())) {
+        // Verify that the user requested size equals the heap requested size,
+        // and that the debug CRT allocations are correctly identified.
+        if (m_tls->size - m_nSize == sizeof(crtdbgblockheader_t) && (m_tls->flags & VLD_TLS_DEBUGCRTALLOC) == 0) {
+            m_tls->flags |= VLD_TLS_DEBUGCRTALLOC;
+        }
+
         blockinfo_t* pblockInfo = NULL;
         if (m_tls->newBlockWithoutGuard == NULL) {
             g_vld.mapBlock(m_tls->heap,
@@ -2964,7 +2971,22 @@ void CaptureContext::Reset() {
 }
 
 BOOL CaptureContext::IsExcludedModule() {
-    HMODULE hModule = GetCallingModule(m_context.fp);
+    HMODULE hModule = NULL;
+
+    ModuleSet::Iterator  moduleit;
+    moduleinfo_t         moduleinfo = { m_context.fp };
+
+    CriticalSectionLocker<> cs(g_vld.m_modulesLock);
+    moduleit = g_vld.m_loadedModules->find(moduleinfo);
+    if (moduleit != g_vld.m_loadedModules->end())
+        hModule = (HMODULE)(*moduleit).addrLow;
+
+    // Using GetCallingModule is safer but very slow as it calls VirtualQuery.
+    // In this instance, since the module is guaranteed to be loaded since it's
+    // on the calling stack we can retrieve the calling module base address
+    // from the internal modules table.
+    //assert(hModule == GetCallingModule(m_context.fp));
+
     if (hModule == g_vld.m_dbghlpBase)
         return TRUE;
 
@@ -2975,5 +2997,8 @@ BOOL CaptureContext::IsExcludedModule() {
         }
     }
 
-    return g_vld.isModuleExcluded((UINT_PTR)hModule);
+    if (moduleit != g_vld.m_loadedModules->end())
+        return (*moduleit).flags & VLD_MODULE_EXCLUDED ? TRUE : FALSE;
+
+    return FALSE;
 }
